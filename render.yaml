@@ -1,0 +1,22 @@
+# Render "Blueprint" for BlockCraft. In Render: New + -> Blueprint -> pick this repo.
+# The free plan works, but read the README note about saved worlds on free hosting.
+services:
+  - type: web
+    name: blockcraft
+    runtime: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+    # Persistent disk (paid plans only). Uncomment, and set plan to "starter",
+    # to keep worlds across restarts and deploys:
+    # disk:
+    #   name: blockcraft-data
+    #   mountPath: /var/data
+    #   sizeGB: 1
+    # and add this env var:
+    #   - key: DATA_DIR
+    #     value: /var/data
