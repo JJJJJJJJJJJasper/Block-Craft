@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BlockCraft</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <div id="game"></div>
+
+  <!-- In-game HUD -->
+  <div id="hud" class="hidden">
+    <div id="crosshair"></div>
+    <div id="item-name"></div>
+    <div id="stats">
+      <div id="hearts"></div>
+      <div id="hunger"></div>
+    </div>
+    <div id="hotbar"></div>
+    <div id="debug" class="hidden"></div>
+    <div id="damage-flash"></div>
+    <div id="mode-badge"></div>
+    <div id="toast"></div>
+    <div id="net-banner" class="hidden">Connection lost - reconnecting...</div>
+  </div>
+
+  <div id="chat">
+    <div id="chat-log"></div>
+    <input id="chat-input" class="hidden" maxlength="200" autocomplete="off" placeholder="Type a message, Enter to send, Esc to cancel. Host: /time day, /mode creative" />
+  </div>
+
+  <div id="player-list" class="hidden"></div>
+  <div id="inventory-screen" class="overlay hidden"></div>
+
+  <!-- Main menu -->
+  <div id="menu-screen" class="overlay screen">
+    <div class="menu-box">
+      <h1 class="logo"><span class="game-name">BlockCraft</span></h1>
+      <p class="tagline">A multiplayer voxel sandbox that runs in your browser</p>
+      <label>Your name <input id="name-input" maxlength="16" autocomplete="off" /></label>
+      <div class="menu-cols">
+        <div class="menu-col">
+          <h2>Create a world</h2>
+          <label>Seed (optional) <input id="seed-input" maxlength="64" placeholder="random" autocomplete="off" /></label>
+          <label>Game mode
+            <select id="mode-select"><option value="survival">Survival</option><option value="creative">Creative</option></select>
+          </label>
+          <button id="create-btn" class="primary">Create World</button>
+        </div>
+        <div class="menu-col">
+          <h2>Join a world</h2>
+          <label>World code <input id="code-input" maxlength="4" placeholder="ABCD" autocomplete="off" /></label>
+          <button id="join-btn" class="primary">Join World</button>
+        </div>
+      </div>
+      <div id="menu-error" class="error hidden"></div>
+      <p class="small">Best in Chrome with a mouse. Trackpad: tap = break, two-finger tap or Alt+click = place (or use R / F keys).</p>
+    </div>
+  </div>
+
+  <!-- Loading -->
+  <div id="loading-screen" class="overlay screen hidden">
+    <div class="menu-box narrow">
+      <h2 id="loading-title">Loading world...</h2>
+      <div class="progress"><div id="loading-bar"></div></div>
+      <p id="loading-detail" class="small"></p>
+    </div>
+  </div>
+
+  <!-- Pause / settings / host controls -->
+  <div id="pause-screen" class="overlay screen hidden">
+    <div class="menu-box">
+      <h2>Game Paused</h2>
+      <div class="tabs" id="pause-tabs">
+        <button data-tab="game" class="active">Game</button>
+        <button data-tab="settings">Settings</button>
+        <button data-tab="host" id="host-tab-btn">Host</button>
+        <button data-tab="controls">Controls</button>
+      </div>
+      <div class="tab" id="tab-game">
+        <button id="resume-btn" class="primary big">Click to Play</button>
+        <div class="invite">
+          <div>World code: <b id="room-code"></b></div>
+          <input id="invite-link" readonly />
+          <button id="copy-link-btn">Copy invite link</button>
+        </div>
+        <button id="leave-btn">Leave World</button>
+      </div>
+      <div class="tab hidden" id="tab-settings">
+        <label>Render distance: <b id="rd-val"></b> chunks <input type="range" id="rd-input" min="2" max="12" step="1" /></label>
+        <label>Field of view: <b id="fov-val"></b> <input type="range" id="fov-input" min="50" max="110" step="1" /></label>
+        <label>Mouse sensitivity: <b id="sens-val"></b> <input type="range" id="sens-input" min="0.1" max="3" step="0.05" /></label>
+        <label>Volume: <b id="vol-val"></b> <input type="range" id="vol-input" min="0" max="1" step="0.05" /></label>
+        <label class="check"><input type="checkbox" id="fps-input" /> Show FPS / debug info (F3 or `)</label>
+        <label class="check"><input type="checkbox" id="hidpi-input" /> Sharp rendering on high-DPI screens (slower)</label>
+      </div>
+      <div class="tab hidden" id="tab-host">
+        <p class="small" id="host-note"></p>
+        <div class="row"><span>Game mode:</span>
+          <button data-mode="survival">Survival</button><button data-mode="creative">Creative</button></div>
+        <div class="row"><span>Time:</span>
+          <button data-time="1000">Morning</button><button data-time="6000">Noon</button>
+          <button data-time="11500">Sunset</button><button data-time="18000">Midnight</button></div>
+        <h3>Players</h3>
+        <div id="host-players"></div>
+      </div>
+      <div class="tab hidden" id="tab-controls">
+        <table class="controls">
+          <tr><td>WASD</td><td>Move</td><td>Mouse</td><td>Look</td></tr>
+          <tr><td>Space</td><td>Jump / swim up</td><td>Space x2</td><td>Toggle flying (creative)</td></tr>
+          <tr><td>Shift</td><td>Sprint (fly: descend)</td><td>W x2</td><td>Sprint</td></tr>
+          <tr><td>Left click / R</td><td>Break (hold) / attack</td><td>Right click / F</td><td>Place / use</td></tr>
+          <tr><td>1-9 / wheel</td><td>Select hotbar slot</td><td>E</td><td>Inventory &amp; crafting</td></tr>
+          <tr><td>Q</td><td>Drop item</td><td>T or /</td><td>Chat</td></tr>
+          <tr><td>Tab</td><td>Player list</td><td>F3 or `</td><td>FPS / debug</td></tr>
+          <tr><td>M</td><td>Mute</td><td>Esc</td><td>Pause / release mouse</td></tr>
+        </table>
+        <p class="small">Chromebook: the top-row keys are browser keys. Hold Search for F-keys, or use ` for the debug screen.
+          On a trackpad, tap to break, two-finger tap or Alt+tap to place.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Death -->
+  <div id="death-screen" class="overlay screen hidden">
+    <div class="menu-box narrow">
+      <h1 class="died">You died!</h1>
+      <p id="death-cause"></p>
+      <button id="respawn-btn" class="primary big">Respawn</button>
+    </div>
+  </div>
+
+  <script type="module" src="./main.js"></script>
+</body>
+</html>
