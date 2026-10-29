@@ -68,7 +68,7 @@ export const SPEED_TOLERANCE = 1.6;     // multiplier on the max legal speed
 
 // ---- Mobs -------------------------------------------------------------------------
 export const MOBS = {
-  maxPigs: 12,
+  maxAnimals: 14,   // pigs, cows, sheep and chickens together
   maxZombies: 10,
   spawnRadiusMin: 16,
   spawnRadiusMax: 40,

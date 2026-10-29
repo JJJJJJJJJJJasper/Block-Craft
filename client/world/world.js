@@ -226,7 +226,7 @@ export class ClientWorld {
     c.meshing = true;
     c.urgent = false;
     this.meshJobsInFlight++;
-    this.pool.run({ type: 'mesh', chunks }, prio).then(res => {
+    this.pool.run({ type: 'mesh', chunks, cx: c.cx, cz: c.cz }, prio).then(res => {
       this.meshJobsInFlight--;
       c.meshing = false;
       if (!res || this.getChunk(c.cx, c.cz) !== c) return;

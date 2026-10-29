@@ -12,7 +12,7 @@ import {
   EDIT_RATE_PER_SEC, EDIT_BURST, CHAT_RATE_PER_SEC, CHAT_BURST, SPEED_TOLERANCE,
   MAX_HEALTH, MAX_HUNGER, MAX_PLAYERS_PER_ROOM, CHUNK_HEIGHT,
 } from '../shared/config.js';
-import { BLOCKS, B, isBlockId, IS_SOLID } from '../shared/blocks.js';
+import { BLOCKS, B, isBlockId, IS_SOLID, needsSupport } from '../shared/blocks.js';
 import { ITEMS, canHarvest, attackDamage, itemId, maxStack } from '../shared/items.js';
 import { SMELTING, SMELT_TIME } from '../shared/recipes.js';
 import { GAME_MODES, sanitizeName } from '../shared/protocol.js';
@@ -41,8 +41,6 @@ const num = (v) => typeof v === 'number' && Number.isFinite(v);
 const int = (v) => Number.isInteger(v);
 const r2 = (v) => Math.round(v * 100) / 100;
 
-// Blocks that need something solid underneath (or beside, for torches).
-const NEEDS_SUPPORT = new Set([B.TORCH, B.TALL_GRASS, B.RED_FLOWER, B.YELLOW_FLOWER]);
 
 export class Room {
   constructor(code, saved, opts = {}) {
@@ -197,7 +195,7 @@ export class Room {
   onPos(p, msg) {
     if (!Array.isArray(msg.p) || msg.p.length !== 3 || !msg.p.every(num)) return;
     if (Array.isArray(msg.r) && msg.r.every(num)) { p.yaw = msg.r[0]; p.pitch = msg.r[1]; }
-    p.flags = (msg.f ? 1 : 0) | (msg.m ? 2 : 0);
+    p.flags = (msg.f ? 1 : 0) | (msg.m ? 2 : 0) | (msg.s ? 4 : 0);
     if (!p.alive) return;
     const now = Date.now();
     const elapsed = Math.min(2, (now - p.lastMoveTime) / 1000);
@@ -266,13 +264,7 @@ export class Room {
     this.setBlock(x, y, z, 0);
     const survival = this.mode === 'survival';
     const held = int(msg.held) ? msg.held : 0;
-    if (survival) {
-      if (def.drops && canHarvest(id, held)) {
-        this.spawnItem({ id: itemId(def.drops), count: 1 }, x + 0.5, y + 0.3, z + 0.5);
-      }
-      if (id === B.LEAVES && Math.random() < 0.06) this.spawnItem({ id: itemId('apple'), count: 1 }, x + 0.5, y + 0.3, z + 0.5);
-      if (id === B.LEAVES && Math.random() < 0.05) this.spawnItem({ id: itemId('stick'), count: 1 }, x + 0.5, y + 0.3, z + 0.5);
-    }
+    if (survival && canHarvest(id, held)) this._dropsFor(def, x + 0.5, y + 0.3, z + 0.5);
     // A furnace drops what was inside it.
     const fkey = `${x},${y},${z}`;
     const f = this.furnaces.get(fkey);
@@ -282,9 +274,21 @@ export class Room {
     }
     // Plants and torches resting on this block pop off.
     const above = this.world.getBlock(x, y + 1, z);
-    if (NEEDS_SUPPORT.has(above)) {
+    if (needsSupport(above) && above !== B.LILY_PAD) {
       this.setBlock(x, y + 1, z, 0);
-      if (survival && BLOCKS[above].drops) this.spawnItem({ id: itemId(BLOCKS[above].drops), count: 1 }, x + 0.5, y + 1.3, z + 0.5);
+      if (survival) this._dropsFor(BLOCKS[above], x + 0.5, y + 1.3, z + 0.5);
+    }
+  }
+
+  /** Spawn what a broken block drops: its `drops` (name or [name, min, max]) plus random `bonus` items. */
+  _dropsFor(def, x, y, z) {
+    if (def.drops) {
+      const [name, min, max] = Array.isArray(def.drops) ? def.drops : [def.drops, 1, 1];
+      const count = min + Math.floor(Math.random() * (max - min + 1));
+      if (count > 0) this.spawnItem({ id: itemId(name), count }, x, y, z);
+    }
+    for (const [name, chance] of def.bonus) {
+      if (Math.random() < chance) this.spawnItem({ id: itemId(name), count: 1 }, x, y, z);
     }
   }
 
@@ -306,8 +310,9 @@ export class Room {
         if (boxIntersectsBlock(m.pos, m.def.width, m.def.height, x, y, z)) return this._reject(p, x, y, z);
       }
     }
-    if (NEEDS_SUPPORT.has(id)) {
+    if (needsSupport(id)) {
       const below = this.world.getBlock(x, y - 1, z);
+      if (id === B.LILY_PAD) { if (below !== B.WATER) return this._reject(p, x, y, z); this.setBlock(x, y, z, id); return; }
       const besides = [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => IS_SOLID[this.world.getBlock(x + dx, y, z + dz)]);
       if (!IS_SOLID[below] && !(id === B.TORCH && besides)) return this._reject(p, x, y, z);
     }

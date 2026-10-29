@@ -9,6 +9,7 @@ import { Game } from './engine/game.js';
 import { Menus } from './ui/menu.js';
 import { loadSettings, saveSettings, bindSettingsUI } from './ui/settings.js';
 import { sfx } from './audio/sfx.js';
+import { BIOME_NAMES } from '../shared/biomes.js';
 
 const settings = loadSettings();
 let game = null;
@@ -66,4 +67,5 @@ async function start(join) {
   const renderer = new Renderer(document.getElementById('game'), textures);
   game = new Game({ renderer, net, textures, settings, menus, sfx, welcome });
   window.__game = game; // handy for debugging in the browser console
+  window.__BIOME_NAMES = BIOME_NAMES;
 }

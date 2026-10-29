@@ -7,7 +7,7 @@ import {
   REACH, CLIENT_SEND_RATE, DAY_TICKS, DAY_LENGTH_SECONDS, MAX_HEALTH, MAX_HUNGER,
   PHYSICS, MIN_RENDER_DISTANCE, CHUNK_SIZE,
 } from '../../shared/config.js';
-import { BLOCKS, B, IS_SOLID } from '../../shared/blocks.js';
+import { BLOCKS, B, IS_SOLID, IS_LIQUID, needsSupport } from '../../shared/blocks.js';
 import { ITEMS, ITEM_BY_NAME, breakTime } from '../../shared/items.js';
 import { raycastBlocks } from '../../shared/raycast.js';
 import { boxIntersectsBlock } from '../../shared/physics.js';
@@ -16,12 +16,11 @@ import { ClientWorld } from '../world/world.js';
 import { Player } from './player.js';
 import { Input } from './input.js';
 import { Entities } from '../rendering/entities.js';
-import { Inventory, InventoryUI, isPlaceable, itemName } from '../ui/inventory.js';
+import { Inventory, InventoryUI, isPlaceable, itemName, ARMOR_SLOT } from '../ui/inventory.js';
 import { Hud } from '../ui/hud.js';
 import { Chat } from '../ui/chat.js';
 
 const TICKS_PER_SECOND = DAY_TICKS / DAY_LENGTH_SECONDS;
-const NEEDS_SUPPORT = new Set([B.TORCH, B.TALL_GRASS, B.RED_FLOWER, B.YELLOW_FLOWER]);
 
 const CREATIVE_KIT = ['grass', 'dirt', 'stone', 'cobblestone', 'planks', 'log', 'glass', 'torch', 'bricks'];
 
@@ -35,6 +34,7 @@ export class Game {
     this.sfx = sfx;
 
     this.myId = welcome.id;
+    this.playerName = welcome.you.name || settings.name || 'Player';
     this.room = welcome.room;
     this.mode = welcome.mode;
     this.hostId = welcome.host;
@@ -71,6 +71,7 @@ export class Game {
         this._endUi();
       },
       click: () => sfx.click(),
+      playerName: () => this.playerName,
     });
 
     this.state = 'loading';
@@ -309,7 +310,8 @@ export class Game {
     this._updateCamera();
     this.entities.listener = p.pos;
     this.entities.update(dt, (x, y, z) => this.world.getBlock(x, y, z));
-    this.renderer.updateEnvironment(this.worldTime / DAY_TICKS, p.headInWater);
+    const eyeBlock = this.world.getBlock(Math.floor(p.pos.x), Math.floor(p.eye.y), Math.floor(p.pos.z));
+    this.renderer.updateEnvironment(this.worldTime / DAY_TICKS, eyeBlock === B.LAVA ? 'lava' : IS_LIQUID[eyeBlock] ? 'water' : null);
     this.hud.update(dt, this.inv, p, this.mode);
     this.hud.showPlayerList(this.input.locked && this.input.down('Tab'), this.playerList, this.hostId, this.net.ping);
     if (this.showDebug) this.hud.setDebug(true, this._debugText());
@@ -340,15 +342,18 @@ export class Game {
       forward: active ? (input.down('KeyW') || input.down('ArrowUp') ? 1 : 0) - (input.down('KeyS') || input.down('ArrowDown') ? 1 : 0) : 0,
       right: active ? (input.down('KeyD') ? 1 : 0) - (input.down('KeyA') ? 1 : 0) : 0,
       jump: active && input.down('Space'),
+      // Shift: sneak on the ground, descend while flying.
       down: active && p.flying && (input.down('ShiftLeft') || input.down('ShiftRight')),
-      sprint: active && ((!p.flying && (input.down('ShiftLeft') || input.down('ShiftRight'))) || input.wasDoubleTapped('KeyW') || (p.sprinting && input.down('KeyW'))),
+      sneak: active && !p.flying && (input.down('ShiftLeft') || input.down('ShiftRight')),
+      // Double-tap W to sprint; keep sprinting while W stays held.
+      sprint: active && (input.wasDoubleTapped('KeyW') || (p.sprinting && input.down('KeyW'))),
     };
     // Don't simulate until the ground under us has loaded (otherwise we'd fall through).
     if (this.world.isReadyAt(p.pos.x, p.pos.z)) {
       const getBlock = (x, y, z) => this.world.getBlock(x, y, z);
       const events = {
         onFallDamage: (n) => this.damage(n, 'fell from a high place'),
-        onDamage: (n, why) => this.damage(n, why === 'drowning' ? 'drowned' : 'starved'),
+        onDamage: (n, why) => this.damage(n, why === 'drowning' ? 'drowned' : why === 'lava' ? 'tried to swim in lava' : 'starved'),
         onStep: (id) => this.sfx.step(BLOCKS[id]?.sound),
       };
       const wasInWater = p.inWater > 0;
@@ -362,7 +367,7 @@ export class Game {
     this.sendTimer += dt;
     if (this.sendTimer >= 1 / CLIENT_SEND_RATE) {
       this.sendTimer = 0;
-      this.net.send({ t: 'pos', p: [r3(p.pos.x), r3(p.pos.y), r3(p.pos.z)], r: [r3(p.yaw), r3(p.pitch)], f: p.flying ? 1 : 0, m: p.moving ? 1 : 0 });
+      this.net.send({ t: 'pos', p: [r3(p.pos.x), r3(p.pos.y), r3(p.pos.z)], r: [r3(p.yaw), r3(p.pitch)], f: p.flying ? 1 : 0, m: p.moving ? 1 : 0, s: p.sneaking ? 1 : 0 });
     }
     // ---- Save inventory/health on the server every few seconds ----
     this.invSyncTimer += dt;
@@ -381,7 +386,10 @@ export class Game {
 
   _updateCamera() {
     const cam = this.renderer.camera, p = this.player;
-    cam.position.set(p.pos.x, p.pos.y + PHYSICS.eyeHeight, p.pos.z);
+    cam.position.set(p.pos.x, p.pos.y + PHYSICS.eyeHeight + p.eyeOffset, p.pos.z);
+    // Sprinting widens the view a little for a sense of speed.
+    const fov = this.settings.fov * (p.sprinting ? 1.1 : 1);
+    if (Math.abs(cam.fov - fov) > 0.05) this.renderer.setFov(cam.fov + (fov - cam.fov) * 0.2);
     cam.rotation.set(p.pitch, p.yaw, 0);
   }
 
@@ -454,12 +462,18 @@ export class Game {
   use(hit, firstPress) {
     const held = this.inv.held;
     const heldDef = held && ITEMS[held.id];
-    // Open crafting tables and furnaces.
-    if (hit && firstPress && hit.id === B.CRAFTING_TABLE) return this.openInventory('crafting');
-    if (hit && firstPress && (hit.id === B.FURNACE || hit.id === B.LIT_FURNACE)) {
+    // Open crafting tables and furnaces (hold Shift to place a block against them instead).
+    const sneak = this.player.sneaking;
+    if (hit && firstPress && !sneak && hit.id === B.CRAFTING_TABLE) return this.openInventory('crafting');
+    if (hit && firstPress && !sneak && (hit.id === B.FURNACE || hit.id === B.LIT_FURNACE)) {
       this.furnacePos = { x: hit.x, y: hit.y, z: hit.z };
       this.net.send({ t: 'furnaceOpen', ...this.furnacePos });
       return this.openInventory('furnace', { pos: this.furnacePos });
+    }
+    // Put on armor.
+    if (heldDef && heldDef.armor) {
+      if (firstPress && this.inv.equipHeld()) this.sfx.place('cloth');
+      return;
     }
     // Eat food.
     if (heldDef && heldDef.food) {
@@ -467,6 +481,18 @@ export class Game {
         this.player.eat(heldDef.food);
         this.inv.consumeHeld(1);
         this.sfx.eat();
+      }
+      return;
+    }
+    // Lily pads go on top of water, which the normal ray passes through.
+    if (held && held.id === B.LILY_PAD) {
+      const e = this.player.eye;
+      const w = raycastBlocks((x, y, z) => this.world.getBlock(x, y, z), [e.x, e.y, e.z], this.player.lookDir(), REACH, (id) => id !== 0);
+      if (w && w.id === B.WATER && this.world.getBlock(w.x, w.y + 1, w.z) === 0) {
+        this.world.setBlock(w.x, w.y + 1, w.z, held.id, true);
+        this.net.send({ t: 'place', x: w.x, y: w.y + 1, z: w.z, id: held.id });
+        this.sfx.place('grass');
+        if (this.mode === 'survival') this.inv.consumeHeld(1);
       }
       return;
     }
@@ -481,8 +507,10 @@ export class Game {
       if (boxIntersectsBlock(this.player.pos, PHYSICS.playerWidth, PHYSICS.playerHeight, x, y, z)) return;
       for (const o of this.entities.playerBoxes()) if (boxIntersectsBlock(o, PHYSICS.playerWidth, PHYSICS.playerHeight, x, y, z)) return;
     }
-    if (NEEDS_SUPPORT.has(held.id)) {
-      const below = IS_SOLID[this.world.getBlock(x, y - 1, z)];
+    if (needsSupport(held.id)) {
+      const belowId = this.world.getBlock(x, y - 1, z);
+      if (held.id === B.LILY_PAD && belowId !== B.WATER) return;
+      const below = IS_SOLID[belowId] || held.id === B.LILY_PAD;
       const beside = [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => IS_SOLID[this.world.getBlock(x + dx, y, z + dz)]);
       if (!below && !(held.id === B.TORCH && beside)) return;
     }
@@ -513,12 +541,18 @@ export class Game {
     if (this.player.health <= 0) this.die(cause);
   }
 
+  /** Damage from a mob: knockback, reduced by armor (which wears down). */
   hurt(amount, from, cause) {
     const p = this.player;
     const dx = p.pos.x - from[0], dz = p.pos.z - from[2];
     const len = Math.hypot(dx, dz) || 1;
     p.vel.x += (dx / len) * 7; p.vel.z += (dz / len) * 7; p.vel.y = 5;
-    this.damage(amount, cause);
+    if (this.mode !== 'survival') return;
+    // Each armor point blocks 4% of the damage (20 points = 80%).
+    const points = Math.min(20, this.inv.armorPoints());
+    const reduced = amount * (1 - points / 25);
+    for (let i = 0; i < 4; i++) if (this.inv.slots[ARMOR_SLOT + i] && this.inv.damageSlot(ARMOR_SLOT + i, 1)) this.hud.toast('Your armor broke!');
+    this.damage(Math.max(0.5, Math.round(reduced * 2) / 2), cause);
   }
 
   die(cause) {

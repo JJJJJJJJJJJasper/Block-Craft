@@ -11,10 +11,12 @@ import * as THREE from 'three';
 import { INTERP_DELAY_MS } from '../../shared/config.js';
 import { moveEntity } from '../../shared/physics.js';
 import { rayBox } from '../../shared/raycast.js';
-import { hashSeed, mulberry32 } from '../../shared/noise.js';
+import { playerColors } from './skin.js';
 
-const MOB_KINDS = ['pig', 'zombie'];
-const MOB_SIZE = { pig: [0.9, 0.9], zombie: [0.6, 1.95] };
+// Must match the order of MOB_TYPES indexes in server/mobs.js.
+const MOB_KINDS = ['pig', 'zombie', 'cow', 'sheep', 'chicken', 'villager'];
+const MOB_SIZE = { pig: [0.9, 0.9], zombie: [0.6, 1.95], cow: [0.9, 1.4], sheep: [0.9, 1.3], chicken: [0.4, 0.7], villager: [0.6, 1.95] };
+const MOB_SOUND = { pig: 'oink', zombie: 'groan', cow: 'moo', sheep: 'baa', chicken: 'cluck', villager: 'hmm' };
 
 function lerpAngle(a, b, t) {
   let d = b - a;
@@ -65,7 +67,90 @@ function humanoid(skin, shirt, pants, eye = '#3355aa') {
     arm.add(sleeve);
   }
   g.add(head, body, armL, armR, legL, legR);
-  return { group: g, head, armL, armR, legL, legR, materials: [skinM, shirtM, pantsM, faceM] };
+  return { group: g, head, body, armL, armR, legL, legR, materials: [skinM, shirtM, pantsM, faceM] };
+}
+
+/** Villager: a robed humanoid with a big nose and folded arms. */
+function villagerModel() {
+  const m = humanoid('#c69472', '#6b4a2b', '#5a3d22', '#2a6a2a');
+  const robe = new THREE.Mesh(new THREE.BoxGeometry(0.52, 0.6, 0.3), m.materials[1]);
+  robe.position.y = 0.55;
+  const nose = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.2, 0.1), m.materials[0]);
+  nose.position.set(0, -0.08, 0.3);
+  m.head.add(nose);
+  m.group.add(robe);
+  m.armL.rotation.x = m.armR.rotation.x = -0.9;
+  m.armL.position.x = 0.2; m.armR.position.x = -0.2;
+  m.foldedArms = true;
+  return m;
+}
+
+/**
+ * Generic four-legged animal. Front faces +Z.
+ * body = [width, height, length], head = [w, h, d], colours as hex numbers.
+ */
+function quadruped({ body: [bw, bh, bl], legH, head: [hw, hh, hd], color, dark, faceColor, eye = '#222222', bodyMap = null }) {
+  const main = new THREE.MeshLambertMaterial({ color, map: bodyMap });
+  const plain = bodyMap ? new THREE.MeshLambertMaterial({ color }) : main;
+  const darkM = new THREE.MeshLambertMaterial({ color: dark });
+  const faceM = new THREE.MeshLambertMaterial({ map: faceTexture(faceColor, eye) });
+  const g = new THREE.Group();
+  const bodyMesh = new THREE.Mesh(new THREE.BoxGeometry(bw, bh, bl), main);
+  bodyMesh.position.y = legH + bh / 2;
+  const head = new THREE.Mesh(new THREE.BoxGeometry(hw, hh, hd), [plain, plain, plain, plain, faceM, plain]);
+  head.position.set(0, legH + bh * 0.85, bl / 2 + hd / 2 - 0.05);
+  const legs = [];
+  const lw = Math.min(0.22, bw / 3);
+  for (const [x, z] of [[bw / 2 - lw / 2, bl / 2 - lw], [-bw / 2 + lw / 2, bl / 2 - lw], [bw / 2 - lw / 2, -bl / 2 + lw], [-bw / 2 + lw / 2, -bl / 2 + lw]]) {
+    const l = limb(lw, legH, lw, darkM);
+    l.position.set(x, legH, z);
+    legs.push(l);
+    g.add(l);
+  }
+  g.add(bodyMesh, head);
+  return { group: g, head, legs, materials: [main, darkM, faceM, plain] };
+}
+
+function spottedTexture() {
+  const c = document.createElement('canvas');
+  c.width = c.height = 16;
+  const x = c.getContext('2d');
+  x.fillStyle = '#ffffff'; x.fillRect(0, 0, 16, 16);
+  x.fillStyle = '#2a1e16';
+  for (const [a, b, w, h] of [[1, 1, 5, 4], [9, 3, 5, 5], [3, 9, 4, 5], [11, 11, 4, 3]]) x.fillRect(a, b, w, h);
+  const t = new THREE.CanvasTexture(c);
+  t.magFilter = t.minFilter = THREE.NearestFilter;
+  return t;
+}
+
+function cowModel() {
+  const m = quadruped({ body: [0.75, 0.6, 1.1], legH: 0.6, head: [0.5, 0.5, 0.35], color: 0x5a4030, dark: 0x3a2a1e, faceColor: '#5a4030', bodyMap: spottedTexture() });
+  const hornM = new THREE.MeshLambertMaterial({ color: 0xe8e0c8 });
+  for (const x of [0.22, -0.22]) { const h = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.15, 0.08), hornM); h.position.set(x, 0.3, 0); m.head.add(h); }
+  return m;
+}
+
+function sheepModel() {
+  const m = quadruped({ body: [0.75, 0.65, 1.0], legH: 0.55, head: [0.4, 0.45, 0.4], color: 0xeeeeee, dark: 0xd8c8b8, faceColor: '#d8c8b8' });
+  return m;
+}
+
+function chickenModel() {
+  const white = new THREE.MeshLambertMaterial({ color: 0xffffff });
+  const yellow = new THREE.MeshLambertMaterial({ color: 0xf0b020 });
+  const red = new THREE.MeshLambertMaterial({ color: 0xd02020 });
+  const faceM = new THREE.MeshLambertMaterial({ map: faceTexture('#ffffff', '#111111') });
+  const g = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.38, 0.35, 0.45), white);
+  body.position.y = 0.42;
+  const head = new THREE.Mesh(new THREE.BoxGeometry(0.25, 0.3, 0.2), [white, white, white, white, faceM, white]);
+  head.position.set(0, 0.7, 0.22);
+  const beak = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.08, 0.1), yellow); beak.position.set(0, 0, 0.14); head.add(beak);
+  const wattle = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.1, 0.06), red); wattle.position.set(0, -0.1, 0.13); head.add(wattle);
+  const legs = [];
+  for (const x of [0.08, -0.08]) { const l = limb(0.06, 0.25, 0.06, yellow); l.position.set(x, 0.25, 0); legs.push(l); g.add(l); }
+  g.add(body, head);
+  return { group: g, head, legs, materials: [white, yellow, red, faceM] };
 }
 
 function pigModel() {
@@ -153,11 +238,8 @@ export class Entities {
 
   _addPlayer(id, name) {
     // Colours derived from the name, so each player looks consistent everywhere.
-    const r = mulberry32(hashSeed(name));
-    const skins = ['#f1c27d', '#e0ac69', '#c68642', '#8d5524', '#ffdbac'];
-    const shirt = new THREE.Color().setHSL(r(), 0.55, 0.45);
-    const pants = new THREE.Color().setHSL(r(), 0.4, 0.25);
-    const m = humanoid(skins[Math.floor(r() * skins.length)], shirt, pants);
+    const c = playerColors(name);
+    const m = humanoid(c.skin, c.shirt, c.pants);
     const tag = nameTag(name);
     tag.position.y = 2.25;
     m.group.add(tag);
@@ -183,8 +265,9 @@ export class Entities {
   }
 
   _addMob(id, kind, x, y, z) {
-    const m = kind === 'zombie' ? humanoid('#5f9b4c', '#2f8c8c', '#3b3f8f', '#111111') : pigModel();
-    if (kind === 'zombie') { m.armL.rotation.x = -Math.PI / 2; m.armR.rotation.x = -Math.PI / 2; }
+    const make = { zombie: () => humanoid('#5f9b4c', '#2f8c8c', '#3b3f8f', '#111111'), cow: cowModel, sheep: sheepModel, chicken: chickenModel, villager: villagerModel };
+    const m = (make[kind] || pigModel)();
+    if (kind === 'zombie') { m.armL.rotation.x = -Math.PI / 2; m.armR.rotation.x = -Math.PI / 2; m.zombie = true; }
     m.group.position.set(x, y, z);
     this.scene.add(m.group);
     const e = { ...m, kind, buffer: [], walk: 0, hurt: false, soundTimer: 3 + Math.random() * 8 };
@@ -238,7 +321,8 @@ export class Entities {
       if (e.soundTimer < 0) {
         e.soundTimer = 6 + Math.random() * 10;
         const p = e.group.position, d = this._distTo(p.x, p.y, p.z);
-        if (e.kind === 'pig') this.sfx.oink(d); else this.sfx.groan(d);
+        const sound = this.sfx[MOB_SOUND[e.kind]];
+        if (sound) sound.call(this.sfx, d);
       }
     }
     // Items: same simple physics as the server, then bob and spin.
@@ -275,6 +359,14 @@ export class Entities {
     e.group.rotation.y = yaw;
     e.group.visible = true;
     if (e.head && isPlayer) e.head.rotation.x = -lerpAngle(a.pitch, c.pitch, t);
+    // Crouching players lean forward and sink a little.
+    if (isPlayer && e.body) {
+      const crouch = (c.flags & 4) !== 0;
+      e.body.rotation.x = crouch ? 0.45 : 0;
+      e.body.position.z = crouch ? 0.12 : 0;
+      e.head.position.y = crouch ? 1.55 : 1.75;
+      e.group.position.y -= crouch ? 0.12 : 0;
+    }
     // Walking animation: swing limbs with a sine wave scaled by speed.
     const moving = speed > 0.3 && speed < 30;
     e.walk += dt * (moving ? Math.min(speed, 6) * 2.2 : 0);
@@ -282,8 +374,13 @@ export class Entities {
     if (e.legL) {
       e.legL.rotation.x = swing; e.legR.rotation.x = -swing;
       if (isPlayer) { e.armL.rotation.x = -swing; e.armR.rotation.x = swing; }
+      else if (!e.zombie && !e.foldedArms) { e.armL.rotation.x = -swing * 0.5; e.armR.rotation.x = swing * 0.5; }
     }
-    if (e.legs) { e.legs[0].rotation.x = swing; e.legs[3].rotation.x = swing; e.legs[1].rotation.x = -swing; e.legs[2].rotation.x = -swing; }
+    if (e.legs) {
+      // Diagonal pairs move together (2-legged chickens just alternate).
+      const pattern = e.legs.length === 2 ? [1, -1] : [1, -1, -1, 1];
+      e.legs.forEach((leg, i) => { leg.rotation.x = swing * pattern[i]; });
+    }
   }
 
   /** Ray test against mobs; returns {id, dist} of the nearest hit or null. */

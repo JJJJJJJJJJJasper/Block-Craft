@@ -8,10 +8,19 @@ import { MOBS, PHYSICS } from '../shared/config.js';
 import { B, IS_SOLID, IS_LIQUID } from '../shared/blocks.js';
 import { itemId } from '../shared/items.js';
 
+const rnd = (a, b) => a + Math.floor(Math.random() * (b - a + 1));
+
+// `index` must match MOB_KINDS order in client/rendering/entities.js.
 export const MOB_TYPES = {
-  pig: { index: 0, width: 0.9, height: 0.9, health: 10, speed: 1.6, drops: () => [['raw_porkchop', 1 + Math.floor(Math.random() * 2)]] },
-  zombie: { index: 1, width: 0.6, height: 1.95, health: 20, speed: 2.6, damage: 3, drops: () => (Math.random() < 0.7 ? [['rotten_flesh', 1 + Math.floor(Math.random() * 2)]] : []) },
+  pig: { index: 0, width: 0.9, height: 0.9, health: 10, speed: 1.6, passive: true, drops: () => [['raw_porkchop', rnd(1, 3)]] },
+  zombie: { index: 1, width: 0.6, height: 1.95, health: 20, speed: 2.6, damage: 3, drops: () => (Math.random() < 0.7 ? [['rotten_flesh', rnd(1, 2)]] : []) },
+  cow: { index: 2, width: 0.9, height: 1.4, health: 10, speed: 1.4, passive: true, drops: () => [['leather', rnd(0, 2)], ['raw_beef', rnd(1, 3)]] },
+  sheep: { index: 3, width: 0.9, height: 1.3, health: 8, speed: 1.4, passive: true, drops: () => [['white_wool', 1], ['raw_mutton', rnd(1, 2)]] },
+  chicken: { index: 4, width: 0.4, height: 0.7, health: 4, speed: 1.3, passive: true, drops: () => [['feather', rnd(0, 2)], ['raw_chicken', 1]] },
+  villager: { index: 5, width: 0.6, height: 1.95, health: 20, speed: 1.1, drops: () => [] },
 };
+// Relative chance of each farm animal when one spawns.
+const ANIMALS = [['pig', 3], ['cow', 3], ['sheep', 4], ['chicken', 3]];
 
 let nextMobId = 1;
 
@@ -28,14 +37,20 @@ export class MobManager {
     return n;
   }
 
-  spawn(type, x, y, z) {
+  countPassive() {
+    let n = 0;
+    for (const m of this.mobs.values()) if (m.def.passive) n++;
+    return n;
+  }
+
+  spawn(type, x, y, z, home = null) {
     const def = MOB_TYPES[type];
     const m = {
       id: nextMobId++, type, def,
       pos: { x, y, z }, vel: { x: 0, y: 0, z: 0 },
       yaw: Math.random() * Math.PI * 2, health: def.health,
       wander: 0, walking: false, fleeTimer: 0, fleeFrom: null,
-      attackCooldown: 0, hurtTimer: 0, onGround: false, burnTimer: 0,
+      attackCooldown: 0, hurtTimer: 0, onGround: false, burnTimer: 0, home,
     };
     this.mobs.set(m.id, m);
     return m;
@@ -51,6 +66,7 @@ export class MobManager {
     if (this.spawnTimer > 1) {
       this.spawnTimer = 0;
       this._trySpawn(players);
+      for (const p of players) this._spawnVillagers(p);
     }
 
     const night = room.isNight();
@@ -63,7 +79,7 @@ export class MobManager {
       }
       if (nd > MOBS.despawnRadius) { this.mobs.delete(m.id); continue; }
       if (m.type === 'zombie') this._zombie(m, dt, players, night);
-      else this._pig(m, dt);
+      else this._wanderer(m, dt);
       this._physics(m, dt);
       if (m.hurtTimer > 0) m.hurtTimer -= dt;
       if (m.pos.y < -20) this.mobs.delete(m.id);
@@ -84,14 +100,30 @@ export class MobManager {
     const night = room.isNight();
     if (night && room.mode === 'survival' && this.count('zombie') < MOBS.maxZombies) {
       this.spawn('zombie', x + 0.5, y + 1, z + 0.5);
-    } else if (!night && ground === B.GRASS && this.count('pig') < MOBS.maxPigs) {
-      // spawn pigs in small groups
+    } else if (!night && ground === B.GRASS && this.countPassive() < MOBS.maxAnimals) {
+      // farm animals spawn in small herds of one kind
+      let roll = Math.random() * ANIMALS.reduce((a, [, w]) => a + w, 0), kind = 'pig';
+      for (const [k, w] of ANIMALS) { if ((roll -= w) < 0) { kind = k; break; } }
       const n = 1 + Math.floor(Math.random() * 3);
-      for (let i = 0; i < n; i++) this.spawn('pig', x + 0.5 + i * 0.6, y + 1, z + 0.5);
+      for (let i = 0; i < n; i++) this.spawn(kind, x + 0.5 + i * 0.6, y + 1, z + 0.5);
     }
   }
 
-  _pig(m, dt) {
+  /** Keep a few villagers in any village near this player. */
+  _spawnVillagers(p) {
+    const v = this.room.world.gen.villageNear(p.pos.x, p.pos.z, 96);
+    if (!v) return;
+    let n = 0;
+    for (const m of this.mobs.values()) if (m.type === 'villager' && m.home && m.home.id === v.id) n++;
+    if (n >= 5) return;
+    const x = Math.floor(v.x + (Math.random() - 0.5) * 14), z = Math.floor(v.z + (Math.random() - 0.5) * 14);
+    const y = this.room.world.surfaceY(x, z);
+    if (y < 0 || !IS_SOLID[this.room.world.getBlock(x, y, z)] || IS_LIQUID[this.room.world.getBlock(x, y, z)]) return;
+    this.spawn('villager', x + 0.5, y + 1, z + 0.5, v);
+  }
+
+  /** Passive mobs: wander about, flee when hit; villagers stay near home. */
+  _wanderer(m, dt) {
     const def = m.def;
     let speed = def.speed;
     if (m.fleeTimer > 0) {
@@ -104,6 +136,10 @@ export class MobManager {
       if (m.wander <= 0) {
         m.walking = Math.random() < 0.6;
         m.yaw = Math.random() * Math.PI * 2;
+        // Villagers head back toward the village centre if they stray.
+        if (m.home && Math.hypot(m.home.x - m.pos.x, m.home.z - m.pos.z) > 20) {
+          m.yaw = Math.atan2(m.home.x - m.pos.x, m.home.z - m.pos.z); m.walking = true;
+        }
         m.wander = 2 + Math.random() * 4;
       }
     }
@@ -165,6 +201,7 @@ export class MobManager {
       m.vel.y += (2 - m.vel.y) * Math.min(1, dt * 3); // float upward
     } else {
       m.vel.y -= PHYSICS.gravity * dt;
+      if (m.type === 'chicken' && m.vel.y < -3) m.vel.y = -3; // chickens flap and fall slowly
     }
     const res = moveEntity(m.pos, m.vel, dt, m.def.width, m.def.height, get);
     m.onGround = res.onGround;
@@ -181,12 +218,13 @@ export class MobManager {
       const dx = m.pos.x - attacker.x, dz = m.pos.z - attacker.z;
       const len = Math.hypot(dx, dz) || 1;
       m.vel.x = (dx / len) * 6; m.vel.z = (dz / len) * 6; m.vel.y = 5;
-      if (m.type === 'pig') { m.fleeTimer = 4; m.fleeFrom = { ...attacker }; }
+      if (m.def.passive || m.type === 'villager') { m.fleeTimer = 4; m.fleeFrom = { ...attacker }; }
     }
     if (m.health <= 0) {
       this.mobs.delete(m.id);
       if (this.room.mode === 'survival') {
         for (const [name, count] of m.def.drops()) {
+          if (count <= 0) continue;
           this.room.spawnItem({ id: itemId(name), count }, m.pos.x, m.pos.y + 0.5, m.pos.z);
         }
       }

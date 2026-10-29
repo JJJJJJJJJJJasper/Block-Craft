@@ -5,8 +5,8 @@
 // The server checks those reports and can send a correction ("teleport").
 // ============================================================================
 import { PHYSICS as P, MAX_HEALTH, MAX_HUNGER, FALL_DAMAGE_START, HUNGER_DRAIN_SECONDS } from '../../shared/config.js';
-import { moveEntity, liquidLevel } from '../../shared/physics.js';
-import { IS_LIQUID } from '../../shared/blocks.js';
+import { moveEntity, liquidLevel, isSupported } from '../../shared/physics.js';
+import { IS_LIQUID, B } from '../../shared/blocks.js';
 
 export class Player {
   constructor() {
@@ -17,7 +17,11 @@ export class Player {
     this.onGround = false;
     this.flying = false;
     this.sprinting = false;
-    this.inWater = 0;        // 0..1 fraction of the body submerged
+    this.sneaking = false;
+    this.eyeOffset = 0;      // camera dips when sneaking (smoothed)
+    this.inWater = 0;
+    this.inLava = false;
+    this.lavaTimer = 0;        // 0..1 fraction of the body submerged
     this.headInWater = false;
     this.fallStartY = null;  // highest point since leaving the ground
     this.health = MAX_HEALTH;
@@ -32,7 +36,7 @@ export class Player {
     this.hurtTime = 0;       // for red screen flash
   }
 
-  get eye() { return { x: this.pos.x, y: this.pos.y + P.eyeHeight, z: this.pos.z }; }
+  get eye() { return { x: this.pos.x, y: this.pos.y + P.eyeHeight + this.eyeOffset, z: this.pos.z }; }
 
   /** Unit vector the camera looks along. */
   lookDir() {
@@ -43,7 +47,7 @@ export class Player {
   /**
    * Advance the simulation.
    * @param {number} dt seconds since last frame
-   * @param {object} ctl {forward, right, jump, down, sprint} from input
+   * @param {object} ctl {forward, right, jump, down, sprint, sneak} from input
    * @param {(x,y,z)=>number} getBlock
    * @param {object} events callbacks: onFallDamage, onStep, onSplash
    */
@@ -60,10 +64,15 @@ export class Player {
     const wishX = fx * cos + fz * sin;
     const wishZ = -fx * sin + fz * cos;
     this.moving = len > 0;
-    if (!this.moving || ctl.forward <= 0) this.sprinting = false;
-    if (ctl.sprint && ctl.forward > 0 && (creative || this.hunger > 6)) this.sprinting = true;
+    this.sneaking = !!ctl.sneak && !this.flying;
+    if (!this.moving || ctl.forward <= 0 || this.sneaking) this.sprinting = false;
+    else if (ctl.sprint && (creative || this.hunger > 6)) this.sprinting = true;
+    // Camera smoothly dips while sneaking.
+    this.eyeOffset += ((this.sneaking ? -0.22 : 0) - this.eyeOffset) * Math.min(1, dt * 12);
 
     this.inWater = liquidLevel(this.pos, P.playerHeight, getBlock);
+    const fx0 = Math.floor(this.pos.x), fz0 = Math.floor(this.pos.z);
+    this.inLava = getBlock(fx0, Math.floor(this.pos.y + 0.1), fz0) === B.LAVA || getBlock(fx0, Math.floor(this.pos.y + 1), fz0) === B.LAVA;
     this.headInWater = IS_LIQUID[getBlock(Math.floor(this.pos.x), Math.floor(this.pos.y + P.eyeHeight), Math.floor(this.pos.z))] === 1;
 
     if (this.flying) {
@@ -75,7 +84,7 @@ export class Player {
       const vy = (ctl.jump ? 1 : 0) - (ctl.down ? 1 : 0);
       this.vel.y += (vy * speed * 0.75 - this.vel.y) * k;
     } else if (this.inWater > 0) {
-      const speed = P.swimSpeed * (this.sprinting ? 1.3 : 1);
+      const speed = P.swimSpeed * (this.sprinting ? 1.3 : 1) * (this.inLava ? 0.5 : 1);
       const k = 1 - Math.exp(-dt * 6);
       this.vel.x += (wishX * speed - this.vel.x) * k;
       this.vel.z += (wishZ * speed - this.vel.z) * k;
@@ -86,7 +95,7 @@ export class Player {
       if (ctl.down) this.vel.y = Math.max(this.vel.y - 18 * dt, -4);
       this.fallStartY = null;
     } else {
-      const speed = this.sprinting ? P.sprintSpeed : P.walkSpeed;
+      const speed = this.sneaking ? P.walkSpeed * 0.3 : this.sprinting ? P.sprintSpeed : P.walkSpeed;
       // Strong control on the ground, weaker in the air (like real momentum).
       const k = 1 - Math.exp(-dt * (this.onGround ? 14 : 3));
       this.vel.x += (wishX * speed - this.vel.x) * k;
@@ -97,6 +106,13 @@ export class Player {
         this.vel.y = P.jumpVelocity;
         this.onGround = false;
       }
+    }
+
+    // Sneaking on the ground: refuse to step off an edge (like a guard rail).
+    if (this.sneaking && this.onGround && this.inWater === 0) {
+      const hw = P.playerWidth / 2 - 0.05;
+      if (!isSupported({ x: this.pos.x + this.vel.x * dt, y: this.pos.y, z: this.pos.z }, hw, getBlock)) this.vel.x = 0;
+      if (!isSupported({ x: this.pos.x, y: this.pos.y, z: this.pos.z + this.vel.z * dt }, hw, getBlock)) this.vel.z = 0;
     }
 
     const wasOnGround = this.onGround;
@@ -124,7 +140,13 @@ export class Player {
       }
     }
 
-    if (!creative) this._survival(dt, events);
+    if (!creative) {
+      this._survival(dt, events);
+      if (this.inLava) {
+        this.lavaTimer -= dt;
+        if (this.lavaTimer <= 0) { this.lavaTimer = 0.5; events.onDamage(4, 'lava'); }
+      } else this.lavaTimer = 0;
+    }
     if (this.hurtTime > 0) this.hurtTime -= dt;
   }
 

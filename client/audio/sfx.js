@@ -149,6 +149,36 @@ export class Sfx {
     this._tone('sawtooth', 280, 180, 0.12, 0.1 * v, 0.15);
   }
 
+  moo(dist) {
+    if (!this.ready) return;
+    const v = this._dist(dist);
+    if (v <= 0) return;
+    this._tone('sawtooth', 140, 105, 0.7, 0.1 * v);
+    this._tone('triangle', 70, 60, 0.7, 0.08 * v);
+  }
+
+  baa(dist) {
+    if (!this.ready) return;
+    const v = this._dist(dist);
+    if (v <= 0) return;
+    for (let i = 0; i < 4; i++) this._tone('sawtooth', 420 - i * 15, 380 - i * 15, 0.09, 0.07 * v, i * 0.09);
+  }
+
+  cluck(dist) {
+    if (!this.ready) return;
+    const v = this._dist(dist);
+    if (v <= 0) return;
+    this._tone('square', 900, 600, 0.05, 0.06 * v);
+    this._tone('square', 1000, 650, 0.05, 0.05 * v, 0.12);
+  }
+
+  hmm(dist) {
+    if (!this.ready) return;
+    const v = this._dist(dist);
+    if (v <= 0) return;
+    this._tone('triangle', 180, 140, 0.35, 0.12 * v);
+  }
+
   groan(dist) {
     if (!this.ready) return;
     const v = this._dist(dist);

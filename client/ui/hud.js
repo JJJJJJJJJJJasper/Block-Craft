@@ -19,6 +19,7 @@ function pixelIcon(rows, palette) {
 }
 
 const HEART = ['.kk...kk.', 'krrk.krrk', 'krwrrrrrk', 'krrrrrrrk', '.krrrrrk.', '..krrrk..', '...krk...', '....k....', '.........'];
+const ARMOR = ['.kk...kk.', 'kwkkkkkwk', 'kwwwwwwwk', '.kwwwwwk.', '.kwwwwwk.', '.kwwwwwk.', '.kkkkkkk.', '.........', '.........'];
 const DRUM = ['.....kkk.', '....kbbbk', '...kbbbbk', '..kbbbbbk', '.kbbbbk..', 'kwkbbk...', 'kwwkk....', '.kk......', '.........'];
 function icons() {
   const full = { k: '#2a0000', r: '#e02020', w: '#ff9a9a' };
@@ -35,7 +36,10 @@ function icons() {
   };
   const dFull = { k: '#2a1600', b: '#b5652c', w: '#efe8d8' };
   const dEmpty = { k: '#2a1600', b: '#3a2a1a', w: '#4a4030' };
+  const aFull = { k: '#2a2a2a', w: '#d8d8d8' };
+  const aEmpty = { k: '#2a2a2a', w: '#4a4a4a' };
   return {
+    armor: [pixelIcon(ARMOR, aEmpty), half(ARMOR, aFull, aEmpty), pixelIcon(ARMOR, aFull)],
     heart: [pixelIcon(HEART, empty), half(HEART, full, empty), pixelIcon(HEART, full)],
     drum: [pixelIcon(DRUM, dEmpty), half(DRUM, dEmpty, dFull), pixelIcon(DRUM, dFull)],
   };
@@ -56,6 +60,7 @@ export class Hud {
     this.icons = icons();
     this.heartImgs = this._row($('hearts'), 10);
     this.hungerImgs = this._row($('hunger'), 10);
+    this.armorImgs = this._row($('armor'), 10);
     this.lastInvVersion = -1;
     this.lastSelected = -1;
     this.lastStats = '';
@@ -84,9 +89,12 @@ export class Hud {
     const survival = mode === 'survival';
     $('stats').classList.toggle('hidden', !survival);
     if (survival) {
-      const key = `${Math.ceil(player.health)}:${player.hunger}`;
+      const armor = inv.armorPoints();
+      const key = `${Math.ceil(player.health)}:${player.hunger}:${armor}`;
       if (key !== this.lastStats) {
         this.lastStats = key;
+        $('armor').classList.toggle('hidden', armor === 0);
+        this._fill(this.armorImgs, armor, 20, this.icons.armor);
         this._fill(this.heartImgs, Math.ceil(player.health), MAX_HEALTH, this.icons.heart);
         this._fill(this.hungerImgs, player.hunger, MAX_HUNGER, this.icons.drum);
       }

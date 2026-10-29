@@ -12,9 +12,15 @@
 // ============================================================================
 import * as THREE from 'three';
 import { Sky } from './sky.js';
+import { tintPalette } from '../../shared/biomes.js';
+
+const TINTS = tintPalette();
 
 const CHUNK_VERT = /* glsl */`
   attribute vec4 aData;
+  attribute float aTint;
+  uniform vec3 tints[${TINTS.length}];
+  varying vec3 vTint;
   varying vec2 vUv;
   varying float vLayer;
   varying float vSky;
@@ -23,6 +29,7 @@ const CHUNK_VERT = /* glsl */`
   varying float vDist;
   void main() {
     vUv = uv;
+    vTint = tints[int(aTint + 0.5)];
     vLayer = aData.x;
     vSky = aData.y / 15.0;
     vBlock = aData.z / 15.0;
@@ -47,6 +54,7 @@ const CHUNK_FRAG = /* glsl */`
   uniform float fogFar;
   uniform float opacity;
   uniform float cutout;
+  varying vec3 vTint;
   varying vec2 vUv;
   varying float vLayer;
   varying float vSky;
@@ -56,6 +64,9 @@ const CHUNK_FRAG = /* glsl */`
   void main() {
     vec4 tex = texture(atlas, vec3(vUv, vLayer));
     if (cutout > 0.5 && tex.a < 0.5) discard;
+    // Pixels painted with alpha ~0.9 are biome-tinted (grass, leaves, ferns).
+    float tintMask = 1.0 - smoothstep(0.93, 0.97, tex.a);
+    tex.rgb *= mix(vec3(1.0), vTint, tintMask);
     float sky = vSky * daylight;
     float light = max(sky, vBlock);
     // Light levels feel linear to the eye when brightness falls off
@@ -117,6 +128,7 @@ export class Renderer {
       fogFar: { value: 100 },
       opacity: { value: 1 },
       cutout: { value: 1 },
+      tints: { value: TINTS.map(([r, g, b]) => new THREE.Vector3(r, g, b)) },
     });
     this.opaqueMaterial = new THREE.ShaderMaterial({ vertexShader: CHUNK_VERT, fragmentShader: CHUNK_FRAG, uniforms: uniforms() });
     this.transMaterial = new THREE.ShaderMaterial({
@@ -147,10 +159,13 @@ export class Renderer {
   }
 
   /** Called every frame with the world time (0..1, 0 = sunrise). */
-  updateEnvironment(timeFrac, underwater) {
+  /** @param {string|null} submerged 'water', 'lava' or null: what the camera is inside */
+  updateEnvironment(timeFrac, submerged) {
     const env = this.sky.update(timeFrac);
     let fogColor = env.fogColor, near = this.fogNear, far = this.fogFar;
-    if (underwater) { fogColor = new THREE.Color(0x1d3f7a).multiplyScalar(0.4 + env.daylight * 0.6); near = 1; far = 22; }
+    const underwater = !!submerged;
+    if (submerged === 'water') { fogColor = new THREE.Color(0x1d3f7a).multiplyScalar(0.4 + env.daylight * 0.6); near = 1; far = 22; }
+    if (submerged === 'lava') { fogColor = new THREE.Color(0xc84a10); near = 0.2; far = 2.5; }
     for (const m of [this.opaqueMaterial, this.transMaterial]) {
       m.uniforms.daylight.value = env.daylight;
       m.uniforms.fogColor.value.copy(fogColor);
@@ -209,6 +224,7 @@ export class Renderer {
     g.setAttribute('position', new THREE.BufferAttribute(part.pos, 3));
     g.setAttribute('uv', new THREE.BufferAttribute(part.uv, 2));
     g.setAttribute('aData', new THREE.BufferAttribute(part.data, 4));
+    g.setAttribute('aTint', new THREE.BufferAttribute(part.tint, 1));
     g.setIndex(new THREE.BufferAttribute(part.idx, 1));
     g.computeBoundingSphere(); // enables Three's per-mesh frustum culling
     const mesh = new THREE.Mesh(g, transparent ? this.transMaterial : this.opaqueMaterial);
