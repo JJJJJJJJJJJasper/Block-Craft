@@ -12,7 +12,10 @@ import {
   EDIT_RATE_PER_SEC, EDIT_BURST, CHAT_RATE_PER_SEC, CHAT_BURST, SPEED_TOLERANCE,
   MAX_HEALTH, MAX_HUNGER, MAX_PLAYERS_PER_ROOM, CHUNK_HEIGHT,
 } from '../shared/config.js';
-import { BLOCKS, B, isBlockId, IS_SOLID, needsSupport } from '../shared/blocks.js';
+import { BLOCKS, B, isBlockId, IS_SOLID, needsSupport, supportPos, isSupported } from '../shared/blocks.js';
+import { isPlaceableState, canReplace } from '../shared/placement.js';
+import { Interactions } from './interact.js';
+import { Projectiles } from './projectiles.js';
 import { ITEMS, canHarvest, attackDamage, itemId, maxStack } from '../shared/items.js';
 import { SMELTING, SMELT_TIME } from '../shared/recipes.js';
 import { GAME_MODES, sanitizeName } from '../shared/protocol.js';
@@ -57,6 +60,8 @@ export class Room {
     this.players = new Map();                  // id -> player
     this.items = new Map();                    // dropped item entities
     this.mobs = new MobManager(this);
+    this.act = new Interactions(this, saved);   // doors, chests, beds, farming, TNT
+    this.projectiles = new Projectiles(this);   // arrows, snowballs, eggs, ender pearls
     this.hostId = null;
     this.dirty = false;
     this.emptySince = Date.now();
@@ -107,7 +112,8 @@ export class Room {
       editBucket: new Bucket(EDIT_RATE_PER_SEC, EDIT_BURST),
       chatBucket: new Bucket(CHAT_RATE_PER_SEC, CHAT_BURST),
       moveCredit: 4, lastMoveTime: Date.now(), violations: 0,
-      attackCooldown: 0, furnace: null, joinedAt: Date.now(),
+      attackCooldown: 0, furnace: null, container: null, joinedAt: Date.now(),
+      spawnPoint: saved?.spawnPoint ?? null,
     };
     if (p.health <= 0) { p.health = MAX_HEALTH; p.hunger = MAX_HUNGER; p.pos = { ...spawn }; }
     // Make sure the chunk is generated so we don't spawn inside a block that was placed.
@@ -150,7 +156,7 @@ export class Room {
   _remember(p) {
     this.savedPlayers[p.name.toLowerCase()] = {
       pos: { x: r2(p.pos.x), y: r2(p.pos.y), z: r2(p.pos.z) },
-      inv: p.inv, health: p.health, hunger: p.hunger,
+      inv: p.inv, health: p.health, hunger: p.hunger, spawnPoint: p.spawnPoint,
     };
   }
 
@@ -181,6 +187,13 @@ export class Room {
       case 'furnacePut': return this.onFurnacePut(p, msg);
       case 'furnaceTake': return this.onFurnaceTake(p, msg);
       case 'host': return this.onHost(p, msg);
+      case 'use':
+        if (this._editCheck(p, msg.x, msg.y, msg.z)) return this._reject(p, msg.x, msg.y, msg.z);
+        return this.act.use(p, msg);
+      case 'containerSet': return this.act.setContainer(p, msg);
+      case 'containerClose': p.container = null; return;
+      case 'useMob': return this.mobs.use(p, msg);
+      case 'throw': return this.projectiles.launch(p, msg);
       case 'ping': return this.send(p, { t: 'pong', c: msg.c });
       default: return;
     }
@@ -196,6 +209,7 @@ export class Room {
     if (!Array.isArray(msg.p) || msg.p.length !== 3 || !msg.p.every(num)) return;
     if (Array.isArray(msg.r) && msg.r.every(num)) { p.yaw = msg.r[0]; p.pitch = msg.r[1]; }
     p.flags = (msg.f ? 1 : 0) | (msg.m ? 2 : 0) | (msg.s ? 4 : 0);
+    p.held = int(msg.h) && ITEMS[msg.h] ? msg.h : 0; // shown in other players' hands
     if (!p.alive) return;
     const now = Date.now();
     const elapsed = Math.min(2, (now - p.lastMoveTime) / 1000);
@@ -264,7 +278,11 @@ export class Room {
     this.setBlock(x, y, z, 0);
     const survival = this.mode === 'survival';
     const held = int(msg.held) ? msg.held : 0;
-    if (survival && canHarvest(id, held)) this._dropsFor(def, x + 0.5, y + 0.3, z + 0.5);
+    // Doors and beds are two blocks: the partner goes too, and the item drops once.
+    const partner = this.act.partnerOf(id, x, y, z);
+    const dropDef = partner && !def.drops ? BLOCKS[partner[3]] : def;
+    if (survival && canHarvest(id, held)) this._dropsFor(dropDef, x + 0.5, y + 0.3, z + 0.5, held);
+    this.act.broken(x, y, z, id, survival);
     // A furnace drops what was inside it.
     const fkey = `${x},${y},${z}`;
     const f = this.furnaces.get(fkey);
@@ -272,16 +290,27 @@ export class Room {
       if (survival) for (const s of f.slots) if (s) this.spawnItem(s, x + 0.5, y + 0.5, z + 0.5);
       this.furnaces.delete(fkey);
     }
-    // Plants and torches resting on this block pop off.
-    const above = this.world.getBlock(x, y + 1, z);
-    if (needsSupport(above) && above !== B.LILY_PAD) {
-      this.setBlock(x, y + 1, z, 0);
-      if (survival) this._dropsFor(BLOCKS[above], x + 0.5, y + 1.3, z + 0.5);
+    // Plants and torches held up by this block pop off: the block above, and
+    // wall torches on any of the four sides that hang on this block.
+    for (const [dx, dy, dz] of [[0, 1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1]]) {
+      const nx = x + dx, ny = y + dy, nz = z + dz;
+      const nid = this.world.getBlock(nx, ny, nz);
+      if (!needsSupport(nid) || nid === B.LILY_PAD) continue;
+      const [sx, sy, sz] = supportPos(nid, nx, ny, nz);
+      if (sx !== x || sy !== y || sz !== z) continue;
+      const np = this.act.partnerOf(nid, nx, ny, nz);
+      this.act.broken(nx, ny, nz, nid, survival);
+      this.setBlock(nx, ny, nz, 0);
+      if (survival) this._dropsFor(np && !BLOCKS[nid].drops ? BLOCKS[np[3]] : BLOCKS[nid], nx + 0.5, ny + 0.3, nz + 0.5);
     }
   }
 
   /** Spawn what a broken block drops: its `drops` (name or [name, min, max]) plus random `bonus` items. */
-  _dropsFor(def, x, y, z) {
+  _dropsFor(def, x, y, z, held = 0) {
+    // Shears snip leaves, vines, grass and cobwebs off whole.
+    if (ITEMS[held]?.name === 'shears' && /leaves|vine|tall_grass|fern|cobweb|dead_bush/.test(def.name)) {
+      return this.spawnItem({ id: def.base ? itemId(def.base) : def.id, count: 1 }, x, y, z);
+    }
     if (def.drops) {
       const [name, min, max] = Array.isArray(def.drops) ? def.drops : [def.drops, 1, 1];
       const count = min + Math.floor(Math.random() * (max - min + 1));
@@ -292,31 +321,50 @@ export class Room {
     }
   }
 
+  /**
+   * Place one block, or several that belong together (a door's two halves,
+   * a bed's foot and head): msg.blocks = [[x, y, z, id], ...].
+   */
   onPlace(p, msg) {
-    const { x, y, z, id } = msg;
-    if (this._editCheck(p, x, y, z)) return this._reject(p, x, y, z);
-    if (!int(id) || !isBlockId(id) || id === 0) return this._reject(p, x, y, z);
-    const def = BLOCKS[id];
-    if (def.hidden || def.liquid || (id === B.BEDROCK && this.mode !== 'creative')) return this._reject(p, x, y, z);
-    const cur = this.world.getBlock(x, y, z);
-    const curDef = BLOCKS[cur];
-    if (cur !== 0 && !curDef.liquid && !curDef.replaceable) return this._reject(p, x, y, z);
-    // Never place a solid block inside a player or mob.
-    if (def.solid) {
-      for (const o of this.players.values()) {
-        if (o.alive && boxIntersectsBlock(o.pos, PHYSICS.playerWidth, PHYSICS.playerHeight, x, y, z)) return this._reject(p, x, y, z);
-      }
-      for (const m of this.mobs.mobs.values()) {
-        if (boxIntersectsBlock(m.pos, m.def.width, m.def.height, x, y, z)) return this._reject(p, x, y, z);
+    const list = Array.isArray(msg.blocks) ? msg.blocks.slice(0, 2) : [[msg.x, msg.y, msg.z, msg.id]];
+    if (!list.every(b => Array.isArray(b) && b.length === 4 && b.every(int))) return;
+    const reject = () => { for (const [x, y, z] of list) this._reject(p, x, y, z); };
+    for (const [x, y, z, id] of list) {
+      if (this._editCheck(p, x, y, z)) return reject();
+      if (!isBlockId(id) || !isPlaceableState(id) || (id === B.BEDROCK && this.mode !== 'creative')) return reject();
+      const cur = this.world.getBlock(x, y, z);
+      const def = BLOCKS[id];
+      // Slabs may land on their other half to make a double slab.
+      const stacking = BLOCKS[cur]?.shape === 'slab' && def.name === BLOCKS[cur].double;
+      if (!canReplace(cur) && !stacking) return reject();
+      // Never place a solid block inside a player or mob.
+      if (def.solid && !stacking) {
+        for (const o of this.players.values()) {
+          if (o.alive && boxIntersectsBlock(o.pos, PHYSICS.playerWidth, PHYSICS.playerHeight, x, y, z)) return reject();
+        }
+        for (const m of this.mobs.mobs.values()) {
+          if (boxIntersectsBlock(m.pos, m.def.width, m.def.height, x, y, z)) return reject();
+        }
       }
     }
-    if (needsSupport(id)) {
-      const below = this.world.getBlock(x, y - 1, z);
-      if (id === B.LILY_PAD) { if (below !== B.WATER) return this._reject(p, x, y, z); this.setBlock(x, y, z, id); return; }
-      const besides = [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => IS_SOLID[this.world.getBlock(x + dx, y, z + dz)]);
-      if (!IS_SOLID[below] && !(id === B.TORCH && besides)) return this._reject(p, x, y, z);
+    // A two-block set must really be a matching pair.
+    if (list.length === 2) {
+      const [a, b] = list;
+      const da = BLOCKS[a[3]], db = BLOCKS[b[3]];
+      if (!da.base || da.base !== db.base || !(da.door || da.bed)) return reject();
+      if (Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) + Math.abs(a[2] - b[2]) !== 1) return reject();
     }
-    this.setBlock(x, y, z, id);
+    const get = (gx, gy, gz) => this.world.getBlock(gx, gy, gz);
+    const placed = [];
+    for (const [x, y, z, id] of list) {
+      if (needsSupport(id) && !isSupported(id, x, y, z, get)) {
+        for (const [px, py, pz, old] of placed) this.setBlock(px, py, pz, old); // undo the first half
+        return reject();
+      }
+      placed.push([x, y, z, this.world.getBlock(x, y, z)]);
+      this.setBlock(x, y, z, id);
+      this.act.placed(x, y, z, id);
+    }
   }
 
   onAttack(p, msg) {
@@ -392,9 +440,9 @@ export class Room {
   }
 
   // ---- Survival ------------------------------------------------------------------
-  hurtPlayer(p, amount, from) {
-    if (this.mode !== 'survival' || !p.alive) return;
-    this.send(p, { t: 'hurt', amount, from: [from.x, from.y, from.z] });
+  hurtPlayer(p, amount, from, cause = 'was slain by a zombie') {
+    if (this.mode !== 'survival' || !p.alive || amount <= 0) return;
+    this.send(p, { t: 'hurt', amount, from: [from.x, from.y, from.z], cause });
   }
 
   onDied(p, msg) {
@@ -414,7 +462,11 @@ export class Room {
   onRespawn(p) {
     p.alive = true;
     p.health = MAX_HEALTH; p.hunger = MAX_HUNGER;
-    p.pos = { ...this.world.spawn };
+    // Respawn at your bed if it's still there.
+    const sp = p.spawnPoint;
+    const bedOk = sp && BLOCKS[this.world.getBlock(Math.floor(sp.x), Math.floor(sp.y), Math.floor(sp.z))]?.bed;
+    if (sp && !bedOk) { p.spawnPoint = null; this.send(p, { t: 'chat', sys: true, text: 'Your bed was missing, so you woke up at the world spawn.' }); }
+    p.pos = bedOk ? { x: sp.x, y: sp.y + 0.5, z: sp.z } : { ...this.world.spawn };
     this._unstick(p.pos);
     p.moveCredit = 4;
     this.send(p, { t: 'teleport', p: [p.pos.x, p.pos.y, p.pos.z], respawn: true });
@@ -451,6 +503,13 @@ export class Room {
       this.time = ((Math.floor(msg.value) % DAY_TICKS) + DAY_TICKS) % DAY_TICKS;
       this.broadcast({ t: 'time', time: this.time });
       this.dirty = true;
+    } else if (msg.action === 'tp' && Array.isArray(msg.value) && msg.value.length === 3 && msg.value.every(num)) {
+      const [x, y, z] = msg.value;
+      if (Math.abs(x) > 3e7 || Math.abs(z) > 3e7 || y < 0 || y > 400) return;
+      p.pos = { x, y, z };
+      this._unstick(p.pos);
+      p.moveCredit = 4;
+      this.send(p, { t: 'teleport', p: [p.pos.x, p.pos.y, p.pos.z] });
     } else if (msg.action === 'kick') {
       const target = this.players.get(msg.value);
       if (target && target !== p) this.kick(target, `Kicked by ${p.name}`);
@@ -574,14 +633,16 @@ export class Room {
     this.mobs.tick(dt);
     this._tickItems(dt);
     this._tickFurnaces(dt);
+    this.act.tick(dt);
+    this.projectiles.tick(dt);
 
     // Snapshot of every player and mob, ~20 times per second.
     const ps = [];
     for (const p of this.players.values()) {
       if (!p.alive) continue;
-      ps.push([p.id, r2(p.pos.x), r2(p.pos.y), r2(p.pos.z), r2(p.yaw), r2(p.pitch), p.flags]);
+      ps.push([p.id, r2(p.pos.x), r2(p.pos.y), r2(p.pos.z), r2(p.yaw), r2(p.pitch), p.flags, p.held || 0]);
     }
-    this.broadcast({ t: 'snap', p: ps, m: this.mobs.snapshot() });
+    this.broadcast({ t: 'snap', p: ps, m: this.mobs.snapshot(), pr: this.projectiles.snapshot() });
   }
 
   // ---- Saving --------------------------------------------------------------------------
@@ -593,6 +654,7 @@ export class Room {
       version: 1, code: this.code, seed: this.seed, mode: this.mode, time: Math.round(this.time),
       hostToken: this.hostToken, created: this.created, savedAt: Date.now(),
       edits: this.world.serializeEdits(), players: this.savedPlayers, furnaces,
+      ...this.act.serialize(),
     };
   }
 

@@ -147,10 +147,16 @@ const CREATIVE_TABS = [
   ['building', 'Building Blocks', 'bricks'],
   ['decoration', 'Decoration Blocks', 'red_flower'],
   ['nature', 'Natural Blocks', 'grass'],
-  ['tools', 'Tools, Weapons & Armor', 'iron_pickaxe'],
+  ['redstone', 'Redstone', 'redstone'],
+  ['transport', 'Transportation', 'powered_rail'],
+  ['misc', 'Miscellaneous', 'lava_bucket'],
   ['food', 'Foodstuffs', 'apple'],
+  ['tools', 'Tools', 'iron_axe'],
+  ['combat', 'Combat', 'gold_sword'],
+  ['brewing', 'Brewing', 'glass_bottle'],
   ['materials', 'Materials', 'stick'],
-  ['survival', 'Survival Inventory', 'crafting_table'],
+  ['search', 'Search Items', 'compass'],
+  ['survival', 'Survival Inventory', 'chest'],
 ];
 
 export class InventoryUI {
@@ -158,7 +164,7 @@ export class InventoryUI {
    * @param {HTMLElement} root
    * @param {Inventory} inv
    * @param {object} cb callbacks: iconURL, isCreative(), playerName(), dropStack(stack),
-   *                     furnacePut(slot, stack), furnaceTake(slot), onClose(), click()
+   *                     furnacePut(slot, stack), furnaceTake(slot), containerSet(slots), onClose(), click()
    */
   constructor(root, inv, cb) {
     this.root = root;
@@ -196,6 +202,9 @@ export class InventoryUI {
     this.kind = kind;
     this.furnacePos = data.pos || null;
     this.furnaceState = null;
+    // chests etc.: a copy of the contents; every change is sent back to the server
+    this.container = kind === 'container' ? (data.slots || []).map(clone) : null;
+    this.containerKind = data.kind || 'chest';
     this.gridSize = kind === 'crafting' ? 3 : 2;
     this.grid = new Array(this.gridSize * this.gridSize).fill(null);
     this._build();
@@ -219,6 +228,13 @@ export class InventoryUI {
     this.cursorEl.innerHTML = '';
     this.cursorEl._key = null;
     this.cb.onClose();
+  }
+
+  /** Someone else changed the chest we're looking into. */
+  setContainer(pos, slots) {
+    if (this.kind !== 'container') return;
+    this.container = slots.map(clone);
+    this.render();
   }
 
   setFurnaceState(st) {
@@ -254,6 +270,7 @@ export class InventoryUI {
     if (this.kind === 'inventory') this._buildPlayerTop(panel);
     else if (this.kind === 'crafting') this._buildCraftingTop(panel);
     else if (this.kind === 'furnace') this._buildFurnaceTop(panel);
+    else if (this.kind === 'container') this._buildContainerTop(panel);
     if (this.kind !== 'inventory') this._el('div', 'inv-label', panel, 'Inventory');
     this._buildMain(panel);
   }
@@ -305,6 +322,27 @@ export class InventoryUI {
     this.els.furnace[2] = this._slot(f, (b) => this._furnaceClick(2, b), 'big');
   }
 
+  _buildContainerTop(panel) {
+    const titles = { chest: 'Chest', dispenser: 'Dispenser', dropper: 'Dropper', hopper: 'Hopper' };
+    this._el('div', 'inv-label', panel, titles[this.containerKind] || 'Chest');
+    const n = this.container.length;
+    const box = this._el('div', 'inv-main container-grid', panel);
+    if (n < 9) box.style.gridTemplateColumns = `repeat(${n}, var(--slot))`;
+    else if (n === 9) box.style.gridTemplateColumns = 'repeat(3, var(--slot))';
+    this.els.container = [];
+    for (let i = 0; i < n; i++) this.els.container[i] = this._slot(box, (b, sh) => this._containerClick(i, b, sh));
+  }
+
+  _containerClick(i, button, shift) {
+    const c = this.container;
+    if (shift && c[i]) {
+      // shift-click: straight into your inventory
+      const left = this.inv.add(c[i]);
+      c[i] = left > 0 ? { ...c[i], count: left } : null;
+    } else this._localClick(c, i, button, false, 'container');
+    this.cb.containerSet(c);
+  }
+
   _buildMain(panel) {
     const main = this._el('div', 'inv-main', panel);
     for (let i = 9; i < 36; i++) this.els.inv[i] = this._slot(main, (b, sh) => this._localClick(this.inv.slots, i, b, sh, 'inv'));
@@ -329,12 +367,27 @@ export class InventoryUI {
   }
 
   _buildPalette(panel) {
-    const pal = this._el('div', 'palette', panel);
-    const ids = ITEMS.filter(it => it && !it.hidden && it.cat === this.creativeTab).map(it => it.id);
-    for (const id of ids) {
-      const el = this._slot(pal, (b, shift) => this._paletteClick(id, b, shift));
-      renderSlot(el, { id, count: 1 }, this.cb.iconURL);
+    const searching = this.creativeTab === 'search';
+    if (searching) {
+      const box = this._el('input', 'csearch', panel);
+      box.placeholder = 'Type to search...';
+      box.value = this.searchText || '';
+      box.oninput = () => { this.searchText = box.value; fillPalette(); };
+      box.onkeydown = (e) => e.stopPropagation(); // typing E must not close the inventory
+      setTimeout(() => box.focus(), 0);
     }
+    const pal = this._el('div', 'palette', panel);
+    const fillPalette = () => {
+      pal.innerHTML = '';
+      const q = (this.searchText || '').trim().toLowerCase();
+      const ids = ITEMS.filter(it => it && !it.hidden && (searching ? (!q || it.displayName.toLowerCase().includes(q)) : it.cat === this.creativeTab)).map(it => it.id);
+      for (const id of ids) {
+        const el = this._slot(pal, (b, shift) => this._paletteClick(id, b, shift));
+        el.title = itemName(id);
+        renderSlot(el, { id, count: 1 }, this.cb.iconURL);
+      }
+    };
+    fillPalette();
     this._el('div', 'inv-hint', panel, 'Click an item to take a stack. Click the item grid while holding something to delete it.');
   }
 
@@ -345,6 +398,9 @@ export class InventoryUI {
     for (let i = 0; i < this.els.grid.length; i++) renderSlot(this.els.grid[i], this.grid[i], icon);
     if (this.els.out) renderSlot(this.els.out, this._craftResult(), icon);
     if (this.els.preview) drawPlayerPreview(this.els.preview, this.cb.playerName(), this.inv.slots);
+    if (this.kind === 'container' && this.els.container) {
+      for (let i = 0; i < this.container.length; i++) renderSlot(this.els.container[i], this.container[i], icon);
+    }
     if (this.kind === 'furnace') {
       const st = this.furnaceState;
       for (let i = 0; i < 3; i++) renderSlot(this.els.furnace[i], st ? st.slots[i] : null, icon);
@@ -370,6 +426,11 @@ export class InventoryUI {
       if (def && def.armor && !this.inv.slots[ARMOR_SLOT + def.armor.slot]) {
         this.inv.slots[ARMOR_SLOT + def.armor.slot] = slot;
         arr[i] = null;
+        return;
+      }
+      if (this.kind === 'container' && section === 'inv') {
+        arr[i] = this._moveIntoArray(slot, this.container);
+        this.cb.containerSet(this.container);
         return;
       }
       const range = i < 9 ? [9, 36] : [0, 9];
@@ -422,6 +483,18 @@ export class InventoryUI {
     for (let i = from; i < to && s.count > 0; i++) {
       if (!this.inv.slots[i]) { this.inv.slots[i] = clone(s); s.count = 0; }
     }
+    return s.count > 0 ? s : null;
+  }
+
+  /** Move a stack into any array of slots (a chest); returns the leftover or null. */
+  _moveIntoArray(stack, slots) {
+    const s = clone(stack);
+    const max = maxStack(s.id);
+    for (let i = 0; i < slots.length && s.count > 0; i++) {
+      const t = slots[i];
+      if (t && t.id === s.id && t.count < max && max > 1) { const n = Math.min(s.count, max - t.count); t.count += n; s.count -= n; }
+    }
+    for (let i = 0; i < slots.length && s.count > 0; i++) if (!slots[i]) { slots[i] = clone(s); s.count = 0; }
     return s.count > 0 ? s : null;
   }
 

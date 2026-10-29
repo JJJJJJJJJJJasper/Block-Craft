@@ -9,9 +9,9 @@ export const GAME_NAME = 'BlockCraft';
 
 // ---- World layout ----------------------------------------------------------
 export const CHUNK_SIZE = 16;          // blocks along X and Z
-export const CHUNK_HEIGHT = 128;       // blocks along Y
+export const CHUNK_HEIGHT = 256;       // blocks along Y (tall enough for big mountains)
 export const CHUNK_VOLUME = CHUNK_SIZE * CHUNK_SIZE * CHUNK_HEIGHT;
-export const SEA_LEVEL = 50;           // water fills empty space at or below this Y
+export const SEA_LEVEL = 62;           // water fills empty space at or below this Y
 
 // ---- Rendering defaults (client) -------------------------------------------
 export const DEFAULT_RENDER_DISTANCE = 6;   // in chunks

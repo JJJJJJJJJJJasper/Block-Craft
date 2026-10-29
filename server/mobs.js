@@ -6,7 +6,8 @@
 import { moveEntity, liquidLevel } from '../shared/physics.js';
 import { MOBS, PHYSICS } from '../shared/config.js';
 import { B, IS_SOLID, IS_LIQUID } from '../shared/blocks.js';
-import { itemId } from '../shared/items.js';
+import { itemId, ITEMS } from '../shared/items.js';
+import { REACH, SERVER_REACH_SLACK } from '../shared/config.js';
 
 const rnd = (a, b) => a + Math.floor(Math.random() * (b - a + 1));
 
@@ -80,6 +81,12 @@ export class MobManager {
       if (nd > MOBS.despawnRadius) { this.mobs.delete(m.id); continue; }
       if (m.type === 'zombie') this._zombie(m, dt, players, night);
       else this._wanderer(m, dt);
+      if (m.sheared > 0) m.sheared -= dt;  // a sheep's wool grows back
+      // Chickens lay an egg every few minutes.
+      if (m.type === 'chicken' && (m.eggTimer = (m.eggTimer ?? 300 + Math.random() * 300) - dt) <= 0) {
+        m.eggTimer = 300 + Math.random() * 300;
+        room.spawnItem({ id: itemId('egg'), count: 1 }, m.pos.x, m.pos.y + 0.3, m.pos.z);
+      }
       this._physics(m, dt);
       if (m.hurtTimer > 0) m.hurtTimer -= dt;
       if (m.pos.y < -20) this.mobs.delete(m.id);
@@ -203,7 +210,7 @@ export class MobManager {
       m.vel.y -= PHYSICS.gravity * dt;
       if (m.type === 'chicken' && m.vel.y < -3) m.vel.y = -3; // chickens flap and fall slowly
     }
-    const res = moveEntity(m.pos, m.vel, dt, m.def.width, m.def.height, get);
+    const res = moveEntity(m.pos, m.vel, dt, m.def.width, m.def.height, get, m.onGround);
     m.onGround = res.onGround;
     // Hop up one-block steps when walking into a wall.
     if (res.hitWall && (m.onGround || water > 0)) m.vel.y = 7.5;
@@ -234,6 +241,18 @@ export class MobManager {
   }
 
   /** Compact array for network snapshots. */
+  /** Right-click on a mob: shear a sheep (milking a cow happens on the client, it only swaps the bucket). */
+  use(p, msg) {
+    const m = this.mobs.get(msg.mob);
+    if (!m || !p.alive) return;
+    if (Math.hypot(m.pos.x - p.pos.x, m.pos.y - p.pos.y, m.pos.z - p.pos.z) > REACH + SERVER_REACH_SLACK + 1) return;
+    const held = ITEMS[msg.held];
+    if (m.type === 'sheep' && held && held.name === 'shears' && !(m.sheared > 0)) {
+      m.sheared = 240;
+      this.room.spawnItem({ id: itemId('white_wool'), count: rnd(1, 3) }, m.pos.x, m.pos.y + 0.8, m.pos.z);
+    }
+  }
+
   snapshot() {
     const out = [];
     for (const m of this.mobs.values()) {

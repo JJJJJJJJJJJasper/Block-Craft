@@ -26,7 +26,7 @@ const RAW = [
   { name: 'snowy_beach', displayName: 'Cold Beach', grass: '#80b497', foliage: '#60a17b', top: 'sand', filler: 'sand', snowy: true },
   { name: 'plains', displayName: 'Plains', grass: '#91bd59', foliage: '#77ab2f', village: true,
     trees: [0.04, [['oak', 9], ['big_oak', 1]]],
-    plants: [['tall_grass', 0.22], ['red_flower', 0.006], ['yellow_flower', 0.008], ['oxeye_daisy', 0.003], ['azure_bluet', 0.003], ['red_tulip', 0.002], ['white_tulip', 0.002]] },
+    plants: [['tall_grass', 0.22], ['pumpkin', 0.0006], ['red_flower', 0.006], ['yellow_flower', 0.008], ['oxeye_daisy', 0.003], ['azure_bluet', 0.003], ['red_tulip', 0.002], ['white_tulip', 0.002]] },
   { name: 'sunflower_plains', displayName: 'Sunflower Plains', grass: '#91bd59', foliage: '#77ab2f', village: true,
     trees: [0.02, [['oak', 1]]],
     plants: [['tall_grass', 0.2], ['sunflower', 0.05], ['yellow_flower', 0.01], ['red_flower', 0.004]] },
@@ -44,7 +44,7 @@ const RAW = [
     plants: [['tall_grass', 0.04], ['brown_mushroom', 0.02], ['red_mushroom', 0.01]] },
   { name: 'taiga', displayName: 'Taiga', grass: '#86b783', foliage: '#68a464', village: true,
     trees: [0.55, [['spruce', 4], ['pine', 1]]],
-    plants: [['fern', 0.1], ['tall_grass', 0.04], ['brown_mushroom', 0.003]] },
+    plants: [['fern', 0.1], ['tall_grass', 0.04], ['pumpkin', 0.0008], ['brown_mushroom', 0.003]] },
   { name: 'giant_tree_taiga', displayName: 'Mega Taiga', grass: '#86b783', foliage: '#68a464', top: 'podzol',
     trees: [0.6, [['mega_spruce', 2], ['spruce', 3]]],
     plants: [['fern', 0.15], ['tall_grass', 0.05], ['brown_mushroom', 0.01], ['red_mushroom', 0.005], ['dead_bush', 0.004]] },
@@ -85,6 +85,10 @@ const RAW = [
   { name: 'mushroom_fields', displayName: 'Mushroom Island', grass: '#55c93f', foliage: '#2bbb0f', top: 'mycelium',
     trees: [0.08, [['huge_red_mushroom', 1], ['huge_brown_mushroom', 1]]],
     plants: [['red_mushroom', 0.012], ['brown_mushroom', 0.012]] },
+  // The tops of the big mountain ranges (new; added at the end so saved ids don't shift)
+  { name: 'snowy_peaks', displayName: 'Snowy Peaks', grass: '#80b497', foliage: '#60a17b', top: 'snow', filler: 'stone', snowy: true },
+  { name: 'stony_peaks', displayName: 'Stony Peaks', grass: '#8ab689', foliage: '#6da36b', top: 'stone', filler: 'stone',
+    trees: [0.03, [['spruce', 1]]] },
 ];
 
 export const BIOME_LIST = RAW.map((b, i) => ({
@@ -104,4 +108,4 @@ export function tintPalette() {
   for (const b of BIOME_LIST) { out.push(hex(b.grass)); out.push(hex(b.foliage)); }
   return out;
 }
-export const TINT_COUNT = 1 + BIOME_LIST.length * 2; // must stay <= 64 (6 bits in the mesher key)
+export const TINT_COUNT = 1 + BIOME_LIST.length * 2; // shader uniform array size; keep under ~200

@@ -1,7 +1,7 @@
 // ============================================================================
-// Items. Every block is also an item (same numeric id, < 256). Non-block
-// items (tools, armor, food, materials) get ids >= 256. Never reuse an id:
-// saved inventories store items by id.
+// Items. Every block is also an item (same numeric id: below 256, or 1024 and
+// up for newer blocks). Non-block items (tools, armor, food, materials) use
+// ids 256-1023. Never reuse an id: saved inventories store items by id.
 //
 // An inventory slot is stored as { id, count, dmg } (dmg = wear) or null.
 // ============================================================================
@@ -23,11 +23,12 @@ export const ARMOR_TIERS = {
   gold:    { points: [2, 5, 3, 1], durability: [77, 112, 105, 91], color: '#f5d742' },
   iron:    { points: [2, 6, 5, 2], durability: [165, 240, 225, 195], color: '#d8d8d8' },
   diamond: { points: [3, 8, 6, 3], durability: [363, 528, 495, 429], color: '#5ee8e0' },
+  chainmail: { points: [2, 5, 4, 1], durability: [165, 240, 225, 195], color: '#9a9aa2' }, // ids 356-359 (found, not crafted)
 };
 export const ARMOR_PIECES = ['helmet', 'chestplate', 'leggings', 'boots'];
 
 // Base attack damage per tool type (added to the tier bonus).
-const TOOL_DAMAGE = { sword: 4, axe: 3, pickaxe: 2, shovel: 1.5 };
+const TOOL_DAMAGE = { sword: 4, axe: 3, pickaxe: 2, shovel: 1.5, hoe: 1 };
 
 const ITEM_LIST = [
   { id: 256, name: 'stick', icon: 'stick', fuel: 5, cat: 'materials' },
@@ -49,7 +50,7 @@ const ITEM_LIST = [
   { id: 272, name: 'leather', icon: 'leather', cat: 'materials' },
   { id: 273, name: 'string', icon: 'string', cat: 'materials' },
   { id: 274, name: 'wheat', icon: 'wheat', cat: 'materials' },
-  { id: 275, name: 'wheat_seeds', icon: 'seeds', cat: 'materials' },
+  { id: 275, name: 'wheat_seeds', icon: 'seeds', plants: 'wheat_crop', cat: 'materials' },
   { id: 276, name: 'bread', icon: 'bread', food: 5, cat: 'food' },
   { id: 277, name: 'raw_beef', icon: 'meat:#d0453a', food: 3, cat: 'food' },
   { id: 278, name: 'steak', icon: 'meat:#7a4524', food: 8, cat: 'food' },
@@ -73,7 +74,7 @@ for (const tier of Object.keys(TOOL_TIERS)) {
     ITEM_LIST.push({
       id: nextToolId++, name: `${tier}_${type}`, icon: `${type}:${t.color}`,
       tool: type, tier, level: t.level, speed: t.speed, durability: t.durability,
-      damage: TOOL_DAMAGE[type] + t.damage, maxStack: 1, cat: 'tools',
+      damage: TOOL_DAMAGE[type] + t.damage, maxStack: 1, cat: type === 'sword' ? 'combat' : 'tools',
     });
   }
 }
@@ -85,10 +86,122 @@ for (const tier of Object.keys(ARMOR_TIERS)) {
   ARMOR_PIECES.forEach((piece, slot) => {
     ITEM_LIST.push({
       id: nextArmorId++, name: `${tier}_${piece}`, icon: `${piece}:${t.color}`,
-      armor: { slot, points: t.points[slot] }, durability: t.durability[slot], maxStack: 1, cat: 'tools',
+      armor: { slot, points: t.points[slot] }, durability: t.durability[slot], maxStack: 1, cat: 'combat',
     });
   });
 }
+
+// Hoes, ids 360-364 (they till dirt into farmland).
+let nextHoeId = 360;
+for (const tier of Object.keys(TOOL_TIERS)) {
+  const t = TOOL_TIERS[tier];
+  ITEM_LIST.push({ id: nextHoeId++, name: `${tier}_hoe`, icon: `hoe:${t.color}`, tool: 'hoe', tier, level: 0, speed: 1,
+    durability: t.durability, damage: 1, maxStack: 1, cat: 'tools' });
+}
+
+// ---- Everything else in the overworld, ids from 400 --------------------------------
+// food = hunger points restored; returns = what's left in your hand after eating;
+// throw = thrown when used (snowball, egg, ender pearl); fills / empties = buckets.
+// Names of music discs are made up for BlockCraft.
+const MORE = [
+  ['shears', 'shears:#d8d8d8', { maxStack: 1, durability: 238, cat: 'tools' }],
+  ['flint_and_steel', 'flint_and_steel', { maxStack: 1, durability: 64, cat: 'tools', displayName: 'Flint and Steel' }],
+  ['fishing_rod', 'fishing_rod', { maxStack: 1, durability: 64, cat: 'tools' }],
+  ['bow', 'bow', { maxStack: 1, durability: 384, cat: 'combat' }],
+  ['arrow', 'arrow', { cat: 'combat' }],
+  ['compass', 'compass', { cat: 'tools' }],
+  ['clock', 'clock', { cat: 'tools' }],
+  ['empty_map', 'map', { cat: 'misc', displayName: 'Empty Map' }],
+  ['bucket', 'bucket:#3a3a3a', { maxStack: 16, cat: 'misc' }],
+  ['water_bucket', 'bucket:#3b6fd8', { maxStack: 1, cat: 'misc', empties: 'water' }],
+  ['lava_bucket', 'bucket:#ff8a20', { maxStack: 1, cat: 'misc', empties: 'lava', fuel: 1000 }],
+  ['milk_bucket', 'bucket:#f8f8f8', { maxStack: 1, cat: 'misc', drink: true, returns: 'bucket' }],
+  ['shield', 'shield:#8a6a3c', { maxStack: 1, durability: 336, cat: 'combat' }],
+  ['lead', 'lead', { cat: 'tools' }],
+  ['name_tag', 'name_tag', { cat: 'tools' }],
+  ['saddle', 'saddle', { maxStack: 1, cat: 'transport' }],
+  ['iron_horse_armor', 'chestplate:#d8d8d8', { maxStack: 1, cat: 'misc' }],
+  ['golden_horse_armor', 'chestplate:#f5d742', { maxStack: 1, cat: 'misc' }],
+  ['diamond_horse_armor', 'chestplate:#5ee8e0', { maxStack: 1, cat: 'misc' }],
+  ['totem_of_undying', 'totem', { maxStack: 1, cat: 'combat' }],
+  ['charcoal', 'coal:#4a3a2a', { fuel: 80, cat: 'materials' }],
+  ['bone', 'bone', { cat: 'misc' }],
+  ['bone_meal', 'dust:#f0f0e8', { cat: 'materials' }],
+  ['ink_sac', 'dye:#22222e', { cat: 'materials' }],
+  ['cocoa_beans', 'dye:#7a4a1a', { cat: 'materials' }],
+  ['gunpowder', 'dust:#5a5a5a', { cat: 'materials' }],
+  ['sugar', 'dust:#f4f4f4', { cat: 'materials' }],
+  ['paper', 'paper', { cat: 'misc' }],
+  ['book', 'book:#7a4a2a', { cat: 'misc' }],
+  ['writable_book', 'quill_book', { maxStack: 1, cat: 'misc', displayName: 'Book and Quill' }],
+  ['enchanted_book', 'book:#8a4ac8', { maxStack: 1, cat: 'misc' }],
+  ['slimeball', 'ball:#7ad85a', { cat: 'misc' }],
+  ['ender_pearl', 'ball:#1a6a62', { maxStack: 16, cat: 'misc', throw: 'pearl' }],
+  ['egg', 'egg', { maxStack: 16, cat: 'materials', throw: 'egg' }],
+  ['snowball', 'ball:#f4f8fa', { maxStack: 16, cat: 'misc', throw: 'snowball' }],
+  ['iron_nugget', 'nugget:#d8d8d8', { cat: 'materials' }],
+  ['gold_nugget', 'nugget:#f5d742', { cat: 'materials' }],
+  ['glass_bottle', 'bottle:#d8ecf4', { cat: 'brewing' }],
+  ['spider_eye', 'eye:#b02a3a', { food: 2, cat: 'brewing' }],
+  ['fermented_spider_eye', 'eye:#7a4a3a', { cat: 'brewing' }],
+  ['glistering_melon', 'melon_slice:#f5d742', { cat: 'brewing', displayName: 'Glistering Melon' }],
+  ['golden_carrot', 'carrot:#f5d742', { food: 6, cat: 'brewing' }],
+  ['golden_apple', 'apple:#f5d742', { food: 4, regen: 5, cat: 'food' }],
+  ['enchanted_golden_apple', 'apple:#ffe680', { food: 4, regen: 20, cat: 'food' }],
+  ['cookie', 'cookie', { food: 2, cat: 'food' }],
+  ['pumpkin_pie', 'pie', { food: 8, cat: 'food' }],
+  ['mushroom_stew', 'stew:#b08a6a', { food: 6, maxStack: 1, returns: 'bowl', cat: 'food' }],
+  ['rabbit_stew', 'stew:#a8683a', { food: 10, maxStack: 1, returns: 'bowl', cat: 'food' }],
+  ['beetroot_soup', 'stew:#a8283a', { food: 6, maxStack: 1, returns: 'bowl', cat: 'food' }],
+  ['raw_rabbit', 'meat:#e8a8a0', { food: 3, cat: 'food' }],
+  ['cooked_rabbit', 'meat:#b06a3a', { food: 5, cat: 'food' }],
+  ['rabbit_foot', 'drumstick:#d8c8a8', { cat: 'brewing' }],
+  ['rabbit_hide', 'leather:#c8a878', { cat: 'materials' }],
+  ['carrot', 'carrot:#f08a20', { food: 3, plants: 'carrots', cat: 'food' }],
+  ['potato', 'potato:#d8b060', { food: 1, plants: 'potatoes', cat: 'food' }],
+  ['baked_potato', 'potato:#c08030', { food: 5, cat: 'food' }],
+  ['poisonous_potato', 'potato:#a8b84a', { food: 2, cat: 'food' }],
+  ['beetroot', 'beetroot', { food: 1, cat: 'food' }],
+  ['beetroot_seeds', 'seeds:#c89a50', { plants: 'beetroots', cat: 'materials' }],
+  ['melon_seeds', 'seeds:#2a2a1a', { cat: 'materials' }],
+  ['pumpkin_seeds', 'seeds:#e8d8a0', { cat: 'materials' }],
+  ['raw_cod', 'fish:#a8b0b8', { food: 2, cat: 'food', displayName: 'Raw Fish' }],
+  ['cooked_cod', 'fish:#c09060', { food: 5, cat: 'food', displayName: 'Cooked Fish' }],
+  ['raw_salmon', 'fish:#c85a50', { food: 2, cat: 'food' }],
+  ['cooked_salmon', 'fish:#c8784a', { food: 6, cat: 'food' }],
+  ['clownfish', 'fish:#f0782a', { food: 1, cat: 'food' }],
+  ['pufferfish', 'fish:#e8c840', { food: 1, cat: 'food' }],
+  ['bowl', 'bowl', { cat: 'materials' }],
+  ['firework_rocket', 'rocket', { cat: 'misc' }],
+  ['firework_star', 'ball:#5a5a5a', { cat: 'misc' }],
+  ['item_frame', 'frame', { cat: 'decoration' }],
+  ['painting', 'painting', { cat: 'decoration' }],
+  ['armor_stand', 'armor_stand', { maxStack: 16, cat: 'decoration' }],
+  ...[['ember', '#e85a2a'], ['tide', '#2a8ae8'], ['meadow', '#5ac83a'], ['dusk', '#8a4ac8'], ['frost', '#a8e0f0'], ['honey', '#f0c040'],
+    ['cinder', '#5a5a5a'], ['bloom', '#e868a8'], ['moss', '#3a7a3a'], ['echo', '#c8c8c8'], ['ripple', '#40c8b0'], ['spark', '#f8f070']]
+    .map(([n, col]) => [`music_disc_${n}`, `disc:${col}`, { maxStack: 1, cat: 'misc', displayName: `Music Disc (${n[0].toUpperCase()}${n.slice(1)})` }]),
+  ['minecart', 'minecart:#4a4a4a', { maxStack: 1, cat: 'transport' }],
+  ['chest_minecart', 'minecart:#a0743a', { maxStack: 1, cat: 'transport', displayName: 'Minecart with Chest' }],
+  ['furnace_minecart', 'minecart:#6a6a6a', { maxStack: 1, cat: 'transport', displayName: 'Minecart with Furnace' }],
+  ['hopper_minecart', 'minecart:#2e2e32', { maxStack: 1, cat: 'transport', displayName: 'Minecart with Hopper' }],
+  ['tnt_minecart', 'minecart:#d8402e', { maxStack: 1, cat: 'transport', displayName: 'Minecart with TNT' }],
+  ['oak_boat', 'boat:#a8864f', { maxStack: 1, cat: 'transport' }],
+  ['spruce_boat', 'boat:#735532', { maxStack: 1, cat: 'transport' }],
+  ['birch_boat', 'boat:#c4b37b', { maxStack: 1, cat: 'transport' }],
+  ['jungle_boat', 'boat:#a5764d', { maxStack: 1, cat: 'transport' }],
+  ['acacia_boat', 'boat:#ad5d32', { maxStack: 1, cat: 'transport' }],
+  ['dark_oak_boat', 'boat:#4a3218', { maxStack: 1, cat: 'transport' }],
+  ['carrot_on_a_stick', 'carrot_rod', { maxStack: 1, durability: 25, cat: 'transport', displayName: 'Carrot on a Stick' }],
+  ['sign', 'sign', { maxStack: 16, cat: 'decoration' }],
+  ['experience_bottle', 'bottle:#7ad85a', { cat: 'misc', displayName: "Bottle o' Enchanting" }],
+  ['water_bottle', 'bottle:#3b6fd8', { maxStack: 1, cat: 'brewing' }],
+  ['prismarine_shard', 'flint:#5aa898', { cat: 'materials' }],
+  ['prismarine_crystals', 'gem:#b8e0d0', { cat: 'materials' }],
+  ['tripwire_hook', 'hook', { cat: 'redstone' }],
+];
+let nextMoreId = 400;
+for (const [name, icon, extra] of MORE) ITEM_LIST.push({ id: nextMoreId++, name, icon, ...extra });
+if (nextMoreId > 1024) throw new Error('Item ids ran into the block range');
 
 export const ITEMS = [];           // id -> item definition (blocks included)
 export const ITEM_BY_NAME = {};

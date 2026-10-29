@@ -5,7 +5,7 @@
 //
 // CLIENT -> SERVER
 //   join      {name, room, create, seed, token}  first message on connect
-//   pos       {p:[x,y,z], r:[yaw,pitch], f:flying, m:moving}     ~20/s
+//   pos       {p:[x,y,z], r:[yaw,pitch], f:flying, m:moving, s:sneaking, h:heldItemId}  ~20/s
 //   reqChunks {list:[[cx,cz],...]}            ask for edit deltas of chunks
 //   break     {x,y,z, held}                   break a block (held = item id)
 //   place     {x,y,z, id}                     place a block
@@ -25,7 +25,8 @@
 //   error     {msg}
 //   chunks    {list:[[cx,cz,[idx,id,idx,id,...]],...]}   edit deltas per chunk
 //   block     {x,y,z,id}                       a block changed
-//   snap      {p:[[id,x,y,z,yaw,pitch,flags],...], m:[[id,type,x,y,z,yaw,hurt],...]}  ~20/s
+//   snap      {p:[[id,x,y,z,yaw,pitch,flags,heldItem],...], m:[[id,type,x,y,z,yaw,hurt],...]}  ~20/s
+//             flags: 1 flying, 2 moving, 4 sneaking
 //   join/leave {id,name} ; players {list} ; host {id}
 //   chat      {from, text, sys}
 //   mode      {mode} ; time {time}

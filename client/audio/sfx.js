@@ -131,6 +131,26 @@ export class Sfx {
     for (let i = 0; i < 3; i++) this._noise('bandpass', 1200, 1.5, 0.08, 0.25, i * 0.12);
   }
 
+  /** A hissing fuse (lit TNT). */
+  fuse(dist) {
+    if (!this.ready) return;
+    const v = this._dist(dist);
+    if (v > 0) this._noise('highpass', 3500, 0.7, 1.2, 0.25 * v);
+  }
+
+  /** An explosion: a low thump plus a long rumble of noise. */
+  boom(dist) {
+    if (!this.ready) return;
+    const v = Math.max(0.15, 1 - (dist || 0) / 60);
+    this._tone('sine', 90, 30, 0.6, 0.6 * v);
+    this._noise('lowpass', 600, 0.6, 1.4, 0.7 * v);
+    this._noise('bandpass', 1800, 0.8, 0.5, 0.3 * v, 0.02);
+  }
+
+  /** Bow string / throwing whoosh. */
+  twang() { if (this.ready) { this._tone('triangle', 520, 260, 0.15, 0.15); this._noise('bandpass', 2200, 2, 0.12, 0.12); } }
+  whoosh() { if (this.ready) this._noise('bandpass', 900, 1.2, 0.18, 0.2); }
+
   splash() {
     if (!this.ready) return;
     this._noise('lowpass', 1400, 0.5, 0.45, 0.35);

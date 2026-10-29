@@ -16,17 +16,21 @@
 // Output is two meshes per chunk: "opaque" (solid + cut-out blocks like
 // leaves/glass) and "translucent" (water, ice) which must be drawn blended.
 // ============================================================================
-import { IS_OPAQUE, IS_LIQUID, IS_TRANSLUCENT, SHAPE, TINT } from '../../shared/blocks.js';
+import { IS_OPAQUE, IS_LIQUID, IS_TRANSLUCENT, SHAPE, TINT, WALL_DIR, BOXES, BLOCKS, MAX_ID } from '../../shared/blocks.js';
+import { dynamicBoxes, NEIGHBOURS, BOX_FACES } from '../../shared/shapes.js';
+import { connects } from '../../shared/physics.js';
 import { CHUNK_SIZE as CS, CHUNK_HEIGHT as CH } from '../../shared/config.js';
 import { computeLight, sky, blk, PW, PLAYER, PVOL } from './lighting.js';
 
 const LAYER = CS * CS;
-const vol = new Uint8Array(PVOL);   // padded block volume, reused
+const vol = new Uint16Array(PVOL);  // padded block volume, reused
 let faceLayers = null;              // block id * 6 + face -> texture layer
 let biomes = null;                  // biome id per column of the chunk being meshed
 
+const FLAT_ROT = new Uint8Array(MAX_ID); // rails running east-west use a rotated texture
 export function initMesher(layers) {
   faceLayers = layers;
+  for (const b of BLOCKS) if (b && b.flatRot) FLAT_ROT[b.id] = 1;
 }
 
 /**
@@ -38,18 +42,28 @@ function tintOf(id, x, z) {
   return t ? (biomes ? biomes[x + z * CS] : 8) * 2 + t : 0;
 }
 
-// Growable output buffers for one pass.
+// Growable output buffers for one pass. All per-vertex arrays share ONE
+// capacity so they always grow together. (They used to start at different
+// sizes and only grew based on `pos`, so big chunks wrote some vertices'
+// texture/light data past the end: those vertices rendered black.)
 class Buffers {
-  constructor() { this.pos = new Float32Array(1 << 15); this.uv = new Float32Array(1 << 14); this.data = new Uint8Array(1 << 15); this.tint = new Uint8Array(1 << 13); this.idx = new Uint32Array(1 << 14); this.reset(); }
+  constructor() {
+    this.cap = 0;
+    this._grow(8192);
+    this.idx = new Uint32Array(12288);
+    this.reset();
+  }
   reset() { this.v = 0; this.i = 0; }
+  _grow(cap) {
+    const grow = (a, n) => { const b = new (a ? a.constructor : Float32Array)(n); if (a) b.set(a); return b; };
+    this.pos = grow(this.pos, cap * 3);
+    this.uv = grow(this.uv, cap * 2);
+    this.data = this.data ? grow(this.data, cap * 4) : new Uint16Array(cap * 4); // 16-bit: >256 textures
+    this.tint = this.tint ? grow(this.tint, cap) : new Uint8Array(cap);
+    this.cap = cap;
+  }
   ensure(nv, ni) {
-    if ((this.v + nv) * 3 > this.pos.length) {
-      const grow = (a, n) => { const b = new a.constructor(Math.max(a.length * 2, n)); b.set(a); return b; };
-      this.pos = grow(this.pos, (this.v + nv) * 3);
-      this.uv = grow(this.uv, (this.v + nv) * 2);
-      this.data = grow(this.data, (this.v + nv) * 4);
-      this.tint = grow(this.tint, this.v + nv);
-    }
+    if (this.v + nv > this.cap) this._grow(Math.max(this.cap * 2, this.v + nv));
     if (this.i + ni > this.idx.length) {
       const b = new Uint32Array(Math.max(this.idx.length * 2, this.i + ni)); b.set(this.idx); this.idx = b;
     }
@@ -79,7 +93,7 @@ const transBuf = new Buffers();
 
 /**
  * Build meshes for the centre chunk.
- * @param {Uint8Array[]} chunks 9 block arrays, row-major over (dz, dx) in -1..1;
+ * @param {Uint16Array[]} chunks 9 block arrays, row-major over (dz, dx) in -1..1;
  *                              index 4 is the chunk being meshed.
  * @param {Uint8Array} columnBiomes biome id for each of the 16x16 columns
  */
@@ -123,9 +137,17 @@ export function meshChunk(chunks, columnBiomes) {
         const p = (x + CS) + (z + CS) * PW + y * PLAYER;
         const id = vol[p];
         const shape = SHAPE[id];
+        if (shape === 0 || shape === 255) continue;
         if (shape === 1) crossQuads(x, y, z, id, p);
-        else if (shape === 2) torchBox(x, y, z, id, p);
+        else if (shape === 2) torchBox(x, y, z, id, p, 0, 0);
+        else if (shape === 4) torchBox(x, y, z, id, p, WALL_DIR[id * 2], WALL_DIR[id * 2 + 1]);
         else if (shape === 3) flatQuad(x, y, z, id, p);
+        else if (shape === 5) emitBoxes(x, y, z, id, p, BOXES[id]);
+        else if (shape === 6 || shape === 7 || shape === 8) {
+          const conn = NEIGHBOURS.map(([dx, dz]) => connects(id, vol[p + dx + dz * PW]));
+          emitBoxes(x, y, z, id, p, dynamicBoxes(shape === 6 ? 'fence' : shape === 7 ? 'wall' : 'pane', conn));
+        } else if (shape === 9) wallQuad(x, y, z, id, p);
+        else if (shape === 10) cropQuads(x, y, z, id, p);
       }
     }
   }
@@ -133,8 +155,9 @@ export function meshChunk(chunks, columnBiomes) {
   return { opaque: opaqueBuf.export(), trans: transBuf.export() };
 }
 
-// Pre-allocated mask (largest slice is 16 x 128).
-const mask = new Int32Array(CS * CH);
+// Pre-allocated mask (largest slice is 16 x 256). Float64 so the packed key
+// (texture layer, light, AO, tint) can use more than 32 bits.
+const mask = new Float64Array(CS * CH);
 const maskPass = new Uint8Array(CS * CH);
 
 // Neighbour offsets inside the padded volume for each axis.
@@ -177,8 +200,8 @@ function greedyAxis(axis, dir, yLimit) {
         if (!trans && ny < CH) {
           ao = aoValues(np, uStep, vStep, c[uAxis], c[vAxis], uAxis, vAxis);
         } else ao = 0xff; // all corners unoccluded (3,3,3,3)
-        // Pack everything that must match for two faces to merge into one integer.
-        mask[m] = 1 + (faceLayers[id * 6 + face] | (s << 8) | (b << 12) | (ao << 16) | (IS_LIQUID[id] << 24) | (tintOf(id, c[0], c[2]) << 25));
+        // Pack everything that must match for two faces to merge into one number.
+        mask[m] = 1 + faceLayers[id * 6 + face] + 4096 * (s + 16 * (b + 16 * (ao + 256 * (IS_LIQUID[id] + 2 * tintOf(id, c[0], c[2])))));
         maskPass[m] = trans;
         any = true;
       }
@@ -233,8 +256,12 @@ function aoValues(np, uStep, vStep, u, v, uAxis, vAxis) {
 function emitQuad(axis, uAxis, vAxis, dir, d, u, v, w, h, key, trans, face) {
   const buf = trans ? transBuf : opaqueBuf;
   buf.ensure(4, 6);
-  const layer = key & 0xff, s = (key >> 8) & 15, b = (key >> 12) & 15, ao = (key >> 16) & 0xff;
-  const liquid = (key >> 24) & 1, tint = (key >> 25) & 63;
+  // unpack the key built in greedyAxis
+  const layer = key % 4096; let k = Math.floor(key / 4096);
+  const s = k % 16; k = Math.floor(k / 16);
+  const b = k % 16; k = Math.floor(k / 16);
+  const ao = k % 256; k = Math.floor(k / 256);
+  const liquid = k % 2, tint = Math.floor(k / 2);
   // plane position along the slicing axis
   let plane = d + (dir > 0 ? 1 : 0);
   if (liquid && axis === 1 && dir > 0) plane -= 0.12; // water surface sits a little lower
@@ -275,38 +302,111 @@ function crossQuads(x, y, z, id, p) {
   }
 }
 
-// Torch: a thin stick 2/16 wide and 10/16 tall in the middle of the cell.
-function torchBox(x, y, z, id, p) {
+// Torch: a stick 2/16 wide and 10/16 tall. Standing torches sit in the middle
+// of the cell; wall torches (nx, nz = direction away from the wall) are moved
+// against the wall, raised, and tilted outward like a sconce.
+const TILT = Math.sin(0.35);
+function torchBox(x, y, z, id, p, nx, nz) {
   const buf = opaqueBuf;
   buf.ensure(24, 36);
   const layer = faceLayers[id * 6];
   const s = sky[p], b = Math.max(blk[p], 14);
-  const x0 = x + 7 / 16, x1 = x + 9 / 16, z0 = z + 7 / 16, z1 = z + 9 / 16, y0 = y, y1 = y + 10 / 16;
+  const wall = nx !== 0 || nz !== 0;
+  // Local coordinates: (lx, ly, lz) with the stick centred at lx = lz = 0.
+  const place = (lx, ly, lz) => {
+    if (!wall) return [x + 0.5 + lx, y + ly, z + 0.5 + lz];
+    // lean outward: the higher up, the further from the wall
+    const out = -0.42 + ly * TILT;
+    return [x + 0.5 + lx + nx * out, y + 0.22 + ly * 0.95, z + 0.5 + lz + nz * out];
+  };
+  const h = 1 / 16, top = 10 / 16;
   const u0 = 7 / 16, u1 = 9 / 16, v0 = 0, v1 = 10 / 16;
   const sh = (f) => 3 | (f << 2);
   const add = (pts, uvs, f) => {
-    const ids = pts.map((pt, k) => buf.vertex(pt[0], pt[1], pt[2], uvs[k][0], uvs[k][1], layer, s, b, sh(f)));
+    const ids = pts.map((pt, k) => { const w = place(pt[0], pt[1], pt[2]); return buf.vertex(w[0], w[1], w[2], uvs[k][0], uvs[k][1], layer, s, b, sh(f)); });
     buf.quad(ids[0], ids[1], ids[2], ids[3], false);
   };
   const side = [[u0, v0], [u1, v0], [u1, v1], [u0, v1]];
-  add([[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]], side, 4);   // +Z
-  add([[x1, y0, z0], [x0, y0, z0], [x0, y1, z0], [x1, y1, z0]], side, 5);   // -Z
-  add([[x1, y0, z1], [x1, y0, z0], [x1, y1, z0], [x1, y1, z1]], side, 0);   // +X
-  add([[x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0]], side, 1);   // -X
-  add([[x0, y1, z1], [x1, y1, z1], [x1, y1, z0], [x0, y1, z0]], [[u0, 8 / 16], [u1, 8 / 16], [u1, 10 / 16], [u0, 10 / 16]], 2); // top
+  add([[-h, 0, h], [h, 0, h], [h, top, h], [-h, top, h]], side, 4);       // +Z
+  add([[h, 0, -h], [-h, 0, -h], [-h, top, -h], [h, top, -h]], side, 5);   // -Z
+  add([[h, 0, h], [h, 0, -h], [h, top, -h], [h, top, h]], side, 0);       // +X
+  add([[-h, 0, -h], [-h, 0, h], [-h, top, h], [-h, top, -h]], side, 1);   // -X
+  // top: shows the glowing tip of the texture
+  add([[-h, top, h], [h, top, h], [h, top, -h], [-h, top, -h]], [[u0, 8 / 16], [u1, 8 / 16], [u1, 10 / 16], [u0, 10 / 16]], 2);
 }
 
-
-// Lily pads: one horizontal, double-sided quad resting on the water.
+// Lily pads, rails, redstone: one horizontal, double-sided quad just above the floor.
 function flatQuad(x, y, z, id, p) {
   const buf = opaqueBuf;
   buf.ensure(8, 12);
   const layer = faceLayers[id * 6 + 2];
   const s = sky[p], b = blk[p], shade = 3 | (2 << 2), h = y + 0.03;
-  const v0 = buf.vertex(x, h, z, 0, 0, layer, s, b, shade);
-  const v1 = buf.vertex(x + 1, h, z, 1, 0, layer, s, b, shade);
-  const v2 = buf.vertex(x + 1, h, z + 1, 1, 1, layer, s, b, shade);
-  const v3 = buf.vertex(x, h, z + 1, 0, 1, layer, s, b, shade);
+  const r = FLAT_ROT[id]; // swap u/v so the rail texture runs east-west
+  const v0 = buf.vertex(x, h, z, r ? 0 : 0, r ? 1 : 0, layer, s, b, shade);
+  const v1 = buf.vertex(x + 1, h, z, r ? 0 : 1, r ? 0 : 0, layer, s, b, shade);
+  const v2 = buf.vertex(x + 1, h, z + 1, r ? 1 : 1, r ? 0 : 1, layer, s, b, shade);
+  const v3 = buf.vertex(x, h, z + 1, r ? 1 : 0, r ? 1 : 1, layer, s, b, shade);
   buf.quad(v0, v3, v2, v1, false); // facing up
   buf.quad(v0, v1, v2, v3, false); // facing down
+}
+
+// ---- Box shapes: stairs, slabs, doors, fences... ----------------------------------
+const ON_EDGE = [(b) => b[3] >= 1, (b) => b[0] <= 0, (b) => b[4] >= 1, (b) => b[1] <= 0, (b) => b[5] >= 1, (b) => b[2] <= 0];
+const NEIGH = [1, -1, PLAYER, -PLAYER, PW, -PW];
+
+function emitBoxes(x, y, z, id, p, boxes) {
+  const buf = IS_TRANSLUCENT[id] ? transBuf : opaqueBuf;
+  const tint = tintOf(id, x, z);
+  for (const box of boxes) {
+    for (let f = 0; f < 6; f++) {
+      let lp = p;
+      if (ON_EDGE[f](box)) {
+        // A face flush with the cell edge is hidden by an opaque neighbour.
+        const ny = y + (f === 2 ? 1 : f === 3 ? -1 : 0);
+        if (ny >= 0 && ny < CH) {
+          const np = p + NEIGH[f];
+          if (IS_OPAQUE[vol[np]]) continue;
+          lp = np;
+        }
+      }
+      buf.ensure(4, 6);
+      const layer = faceLayers[id * 6 + f];
+      const s = Math.max(sky[lp], sky[p]), bl = Math.max(blk[lp], blk[p]);
+      const ids = BOX_FACES[f](box).map(([vx, vy, vz, u, v]) => buf.vertex(x + vx, y + vy, z + vz, u, v, layer, s, bl, 3 | (f << 2), tint));
+      buf.quad(ids[0], ids[1], ids[2], ids[3], false);
+    }
+  }
+}
+
+// Ladders and vines: a double-sided quad just in front of the wall they hang on.
+function wallQuad(x, y, z, id, p) {
+  const buf = opaqueBuf;
+  buf.ensure(8, 12);
+  const nx = WALL_DIR[id * 2], nz = WALL_DIR[id * 2 + 1];
+  const layer = faceLayers[id * 6], s = sky[p], b = blk[p], tint = tintOf(id, x, z), sh = 3 | (6 << 2);
+  let pts;
+  if (nz !== 0) { const zz = z + (nz < 0 ? 15 / 16 : 1 / 16); pts = [[x, y, zz], [x + 1, y, zz], [x + 1, y + 1, zz], [x, y + 1, zz]]; }
+  else { const xx = x + (nx < 0 ? 15 / 16 : 1 / 16); pts = [[xx, y, z], [xx, y, z + 1], [xx, y + 1, z + 1], [xx, y + 1, z]]; }
+  const uv = [[0, 0], [1, 0], [1, 1], [0, 1]];
+  const ids = pts.map((q, k) => buf.vertex(q[0], q[1], q[2], uv[k][0], uv[k][1], layer, s, b, sh, tint));
+  buf.quad(ids[0], ids[1], ids[2], ids[3], false);
+  buf.quad(ids[0], ids[3], ids[2], ids[1], false);
+}
+
+// Crops: four upright planes in a # pattern.
+function cropQuads(x, y, z, id, p) {
+  const buf = opaqueBuf;
+  buf.ensure(32, 48);
+  const layer = faceLayers[id * 6], s = sky[p], b = blk[p], sh = 3 | (6 << 2);
+  const planes = [];
+  for (const o of [4 / 16, 12 / 16]) {
+    planes.push([[x + o, y, z], [x + o, y, z + 1], [x + o, y + 1, z + 1], [x + o, y + 1, z]]);
+    planes.push([[x, y, z + o], [x + 1, y, z + o], [x + 1, y + 1, z + o], [x, y + 1, z + o]]);
+  }
+  const uv = [[0, 0], [1, 0], [1, 1], [0, 1]];
+  for (const pts of planes) {
+    const ids = pts.map((q, k) => buf.vertex(q[0], q[1], q[2], uv[k][0], uv[k][1], layer, s, b, sh));
+    buf.quad(ids[0], ids[1], ids[2], ids[3], false);
+    buf.quad(ids[0], ids[3], ids[2], ids[1], false);
+  }
 }

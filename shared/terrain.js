@@ -8,9 +8,11 @@
 //
 // Pipeline for each chunk:
 //   1. Climate: smooth noise fields for continentalness (ocean vs land),
-//      erosion (flat vs mountainous), temperature, humidity, "weirdness"
+//      erosion (flat vs hilly), temperature, humidity, "weirdness"
 //      (rare variants) and rivers. Height AND biome are both computed from
 //      these same continuous fields, so biome borders never create cliffs.
+//      A very slow "range" field marks where mountain ranges run; inside a
+//      range, ridged noise builds sharp crests up to ~180 blocks above the sea.
 //   2. Fill: bedrock -> stone -> biome filler -> biome surface -> water/ice.
 //   3. Caves: noise "spaghetti" tunnels, plus random-walk "worm" tunnels,
 //      rooms and ravines (Minecraft-style carvers). Lava fills cave floors
@@ -23,7 +25,8 @@
 // from their own deterministic seed, and each chunk draws the part inside it.
 // ============================================================================
 import { CHUNK_SIZE as CS, CHUNK_HEIGHT as CH, SEA_LEVEL } from './config.js';
-import { B, IS_SOLID, IS_LIQUID, SHAPE } from './blocks.js';
+import { B, IS_SOLID, IS_LIQUID, SHAPE, MAX_ID, stateId } from './blocks.js';
+import { FACINGS } from './shapes.js';
 import { BIOME_LIST, BIOME, BIOME_NAMES } from './biomes.js';
 import { Simplex, hashSeed, hash2, hash3, mulberry32 } from './noise.js';
 
@@ -47,10 +50,14 @@ const seedOf = (r) => (r() * 4294967296) >>> 0;
 // Blocks that grass, trees and plants can grow on.
 const SOIL = new Set([B.GRASS, B.DIRT, B.PODZOL, B.SNOWY_GRASS, B.COARSE_DIRT, B.MYCELIUM]);
 // Blocks a structure may overwrite when it only fills empty space.
-const SOFT = new Uint8Array(256);
+const SOFT = new Uint8Array(MAX_ID);
 for (const id of [B.AIR, B.TALL_GRASS, B.FERN, B.LEAVES, B.SPRUCE_LEAVES, B.BIRCH_LEAVES, B.JUNGLE_LEAVES, B.ACACIA_LEAVES,
   B.DARK_OAK_LEAVES, B.DEAD_BUSH, B.SNOW]) SOFT[id] = 1;
-for (let i = 0; i < 256; i++) if (SHAPE[i] === 1 || SHAPE[i] === 3) SOFT[i] = 1;
+for (let i = 0; i < MAX_ID; i++) if (SHAPE[i] === 1 || SHAPE[i] === 3 || SHAPE[i] === 9 || SHAPE[i] === 10) SOFT[i] = 1;
+const VINE = Object.fromEntries(FACINGS.map(f => [f, stateId('vine', { facing: f })]));
+const COCOA = Object.fromEntries(FACINGS.map(f => [f, stateId('cocoa', { facing: f })]));
+const FACING_OF = { '1,0': 'east', '-1,0': 'west', '0,1': 'south', '0,-1': 'north' };
+const MOUNTAIN_BIOMES = new Set([BIOME.MOUNTAINS, BIOME.WOODED_MOUNTAINS, BIOME.SNOWY_PEAKS, BIOME.STONY_PEAKS]);
 
 export function createGenerator(seedInput) {
   const seed = hashSeed(seedInput);
@@ -58,25 +65,27 @@ export function createGenerator(seedInput) {
   const nContinent = n(1), nErosion = n(2), nTemp = n(3), nHum = n(4), nWeird = n(5);
   const nRiver = n(6), nDetail = n(7), nMush = n(8), nSurface = n(9);
   const nCaveA = n(10), nCaveB = n(11), nCavern = n(12);
+  const nRange = n(13), nRidge = n(14), nPeak = n(15);
 
   // Badlands terracotta stripes: a fixed random colour per height, per world.
   const bandRand = mulberry32(seed ^ 0xba7d);
   const BAND_CHOICES = [B.TERRACOTTA, B.TERRACOTTA, B.ORANGE_TERRACOTTA, B.ORANGE_TERRACOTTA, B.YELLOW_TERRACOTTA,
     B.WHITE_TERRACOTTA, B.RED_TERRACOTTA, B.BROWN_TERRACOTTA, B.LIGHT_GRAY_TERRACOTTA, B.TERRACOTTA];
-  const BANDS = new Uint8Array(CH);
+  const BANDS = new Uint16Array(CH);
   for (let y = 0; y < CH; y++) BANDS[y] = BAND_CHOICES[Math.floor(bandRand() * BAND_CHOICES.length)];
 
   // ---- 1. Climate -> height + biome ---------------------------------------
   /** Everything about one column. Cheap enough to call for neighbour chunks. */
   function column(x, z) {
-    const C = nContinent.fbm2(x / 900, z / 900, 4);   // continentalness
-    const E = nErosion.fbm2(x / 520, z / 520, 3);     // high = mountainous
-    const T = nTemp.fbm2(x / 1100, z / 1100, 3);      // temperature
-    const H = nHum.fbm2(x / 900, z / 900, 3);         // humidity
-    const W = nWeird.fbm2(x / 350, z / 350, 2);       // picks rare variants
-    const R = nRiver.fbm2(x / 750, z / 750, 4);       // rivers follow R = 0
+    // Climate fields are very smooth (scales of 1-2 km), so biomes are big.
+    const C = nContinent.fbm2(x / 2400, z / 2400, 4); // continentalness
+    const E = nErosion.fbm2(x / 1400, z / 1400, 3);   // high = hilly
+    const T = nTemp.fbm2(x / 3200, z / 3200, 3);      // temperature
+    const H = nHum.fbm2(x / 2600, z / 2600, 3);       // humidity
+    const W = nWeird.fbm2(x / 1000, z / 1000, 2);     // picks rare variants
+    const R = nRiver.fbm2(x / 1100, z / 1100, 4);     // rivers follow R = 0
     const D = nDetail.fbm2(x / 110, z / 110, 4);      // local hills
-    const M = nMush.noise2(x / 280, z / 280);         // mushroom islands
+    const M = nMush.noise2(x / 450, z / 450);         // mushroom islands
 
     const land = smoothstep(-0.3, -0.18, C);
     const hilly = smoothstep(0.08, 0.45, E);
@@ -90,14 +99,33 @@ export function createGenerator(seedInput) {
     const pt = (S + 18 + D * 10) / 7;
     const terraced = (Math.floor(pt) + smoothstep(0.6, 1, pt - Math.floor(pt))) * 7;
     landH = lerp(landH, terraced, plateauW);
+    // Mountain ranges. `ridge` is "ridged multifractal" noise: 1 - |noise|
+    // folds the noise into sharp crests, and each finer octave is weighted by
+    // the one before it, so detail piles up on the peaks and valleys stay smooth.
+    const Rg = nRange.fbm2(x / 1500, z / 1500, 3);
+    const rangeW = smoothstep(0.1, 0.34, Rg) * land * (1 - swampW) * (1 - plateauW);
+    let ridge = 0;
+    if (rangeW > 0) {
+      let amp = 1, freq = 1 / 300, weight = 1;
+      for (let o = 0; o < 4; o++) {
+        let v = 1 - Math.abs(nRidge.noise2(x * freq + o * 31.7, z * freq - o * 17.3));
+        v *= v * weight;
+        weight = clamp(v * 1.8, 0, 1);
+        ridge += v * amp; amp *= 0.48; freq *= 2.2;
+      }
+      const jag = nPeak.noise2(x / 23, z / 23) * 5 * smoothstep(0.6, 1.2, ridge); // rocky teeth on the crests
+      const mountainH = S + 22 + ridge * 92 + jag;
+      landH = lerp(landH, Math.max(landH, mountainH), rangeW);
+    }
     let h = lerp(oceanH, landH, land);
     // Mushroom islands rise out of deep ocean.
     const mushW = smoothstep(0.55, 0.68, M) * (1 - smoothstep(-0.42, -0.36, C));
     h = lerp(h, S + 3 + D * 5, mushW);
     // Rivers cut channels where the river noise crosses zero.
-    const riverW = (1 - smoothstep(0.012, 0.04, Math.abs(R))) * land * (1 - mushW) * (1 - plateauW * 0.6);
+    const riverW = (1 - smoothstep(0.01, 0.032, Math.abs(R))) * land * (1 - mushW) * (1 - plateauW * 0.6) * (1 - rangeW * 0.9);
     if (h > S - 3) h = lerp(h, S - 3, riverW);
-    const height = Math.floor(clamp(h, 4, CH - 24));
+    const height = Math.floor(clamp(h, 4, CH - 14));
+    const alt = height - S;
 
     // ---- Biome from the same fields ----
     let biome;
@@ -106,7 +134,13 @@ export function createGenerator(seedInput) {
     else if (height < S - 1 && riverW < 0.5) biome = frozen ? BIOME.FROZEN_OCEAN : C < -0.42 ? BIOME.DEEP_OCEAN : BIOME.OCEAN;
     else if (riverW > 0.55) biome = frozen ? BIOME.FROZEN_RIVER : BIOME.RIVER;
     else if (height <= S + 2 && land < 0.9 && swampW < 0.5) biome = frozen ? BIOME.SNOWY_BEACH : hilly > 0.4 ? BIOME.STONE_BEACH : BIOME.BEACH;
-    else if (frozen) {
+    else if (rangeW > 0.35 && alt > 34) {
+      // up a mountain: forests low down, bare rock higher, snow on top (lower when cold)
+      const snowLine = 104 - T * 40;
+      if (alt > snowLine) biome = BIOME.SNOWY_PEAKS;
+      else if (alt > snowLine - 26) biome = BIOME.STONY_PEAKS;
+      else biome = H > -0.05 ? BIOME.WOODED_MOUNTAINS : BIOME.MOUNTAINS;
+    } else if (frozen) {
       if (hilly > 0.55) biome = BIOME.MOUNTAINS;
       else if (W > 0.32 && H < 0.1) biome = BIOME.ICE_SPIKES;
       else biome = H > 0.0 ? BIOME.SNOWY_TAIGA : BIOME.SNOWY_TUNDRA;
@@ -130,7 +164,7 @@ export function createGenerator(seedInput) {
       else if (H > 0.25) biome = BIOME.JUNGLE;
       else biome = BIOME.DESERT;
     }
-    return { height, biome, hilly };
+    return { height, biome, hilly, rangeW };
   }
 
   // ---- Noise caves (spaghetti tunnels + deep caverns) ----------------------
@@ -229,7 +263,7 @@ export function createGenerator(seedInput) {
           const systems = 1 + Math.floor(r() * r() * 3);
           for (let s = 0; s < systems; s++) {
             const x = sx * CS + r() * CS, z = sz * CS + r() * CS;
-            const y = 12 + r() * (r() * 52);
+            const y = 12 + r() * (r() * 70);
             let tunnels = 1;
             if (r() < 0.25) { carve(x, y, z, 3 + r() * 4, 2.5 + r() * 2); tunnels += Math.floor(r() * 3); }
             for (let t = 0; t < tunnels; t++) {
@@ -260,7 +294,7 @@ export function createGenerator(seedInput) {
     const [chance, kinds] = biome.trees;
     if (!kinds.length || hash2(seed ^ 0x51ed, cellX, cellZ) >= chance) return null;
     if (col.height <= S) return null;
-    if ((col.biome === BIOME.MOUNTAINS || col.biome === BIOME.WOODED_MOUNTAINS) && col.height > 86) return null;
+    if (col.height > S + 95) return null; // above the tree line
     if (isCave(tx, col.height, tz, col.height)) return null;
     let total = 0;
     for (const [, w] of kinds) total += w;
@@ -294,6 +328,19 @@ export function createGenerator(seedInput) {
       }
     };
     const ground = (size = 1) => { for (let a = 0; a < size; a++) for (let b = 0; b < size; b++) put(x + a, y - 1, z + b, B.DIRT, false); };
+    // Jungle trunks: vines climbing the sides, and the odd cocoa pod.
+    const trunkExtras = (h, size) => {
+      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const facing = FACING_OF[`${dx},${dz}`];
+        for (let a = 0; a < size; a++) {
+          const sx = dx > 0 ? x + size : dx < 0 ? x - 1 : x + a, sz = dz > 0 ? z + size : dz < 0 ? z - 1 : z + a;
+          for (let i = 1; i < h - 2; i++) {
+            if (r() < 0.35) put(sx, y + i, sz, VINE[facing], true);
+            else if (i < 6 && r() < 0.04) put(sx, y + i, sz, COCOA[facing], true);
+          }
+        }
+      }
+    };
 
     switch (t.kind) {
       case 'oak': case 'birch': case 'swamp_oak': {
@@ -305,10 +352,13 @@ export function createGenerator(seedInput) {
         disc(top - 2, wide, leaves); disc(top - 1, wide, leaves);
         disc(top, 1, leaves); disc(top + 1, 1, leaves, 1);
         if (t.kind === 'swamp_oak') {
-          // hanging "vines" made of leaves
-          for (let k = 0; k < 6; k++) {
-            const vx = x + Math.floor(r() * 7) - 3, vz = z + Math.floor(r() * 7) - 3;
-            for (let d = 0; d < 1 + r() * 3; d++) put(vx, top - 3 - d, vz, leaves, true);
+          // vines hanging down the outside of the leaves
+          for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+            for (let k = -2; k <= 2; k++) {
+              if (r() < 0.5) continue;
+              const vx = x + dx * (wide + 1) + (dz ? k : 0), vz = z + dz * (wide + 1) + (dx ? k : 0);
+              for (let d = 0; d < 1 + r() * 4; d++) put(vx, top - 2 - d, vz, VINE[FACING_OF[`${dx},${dz}`]], true);
+            }
           }
         }
         trunk(log, h); ground();
@@ -379,6 +429,7 @@ export function createGenerator(seedInput) {
         const top = y + h - 1;
         disc(top - 2, 3, B.JUNGLE_LEAVES); disc(top - 1, 3, B.JUNGLE_LEAVES, 0.7); disc(top, 2, B.JUNGLE_LEAVES); disc(top + 1, 1, B.JUNGLE_LEAVES, 1);
         trunk(B.JUNGLE_LOG, h); ground();
+        trunkExtras(h, 1);
         break;
       }
       case 'mega_jungle': {
@@ -391,6 +442,7 @@ export function createGenerator(seedInput) {
           disc(by, 2, B.JUNGLE_LEAVES, 0.6, bx, bz); disc(by + 1, 1, B.JUNGLE_LEAVES, 0.6, bx, bz);
         }
         trunk(B.JUNGLE_LOG, h, 2); ground(2);
+        trunkExtras(h, 2);
         break;
       }
       case 'jungle_bush': {
@@ -613,20 +665,38 @@ export function createGenerator(seedInput) {
 
   // ---- Main entry point ---------------------------------------------------------
   function generateChunk(cx, cz) {
-    const blocks = new Uint8Array(CS * CS * CH);
+    const blocks = new Uint16Array(CS * CS * CH); // 16-bit: block ids go past 255
     const ox = cx * CS, oz = cz * CS;
     const heights = new Int16Array(LAYER);
     const biomes = new Uint8Array(LAYER);
     const idx = (x, y, z) => x + z * CS + y * LAYER;
+    // Heights two blocks beyond the chunk edge too, to measure how steep each column is.
+    const RW = CS + 4;
+    const ring = new Int16Array(RW * RW);
+    for (let z = -2; z < CS + 2; z++) for (let x = -2; x < CS + 2; x++) {
+      if (x >= 0 && x < CS && z >= 0 && z < CS) continue;
+      ring[(x + 2) + (z + 2) * RW] = column(ox + x, oz + z).height;
+    }
 
     // ---- 2. columns ----
+    const cols = [];
+    for (let z = 0; z < CS; z++) for (let x = 0; x < CS; x++) {
+      const col = column(ox + x, oz + z);
+      cols.push(col);
+      heights[x + z * CS] = col.height;
+      biomes[x + z * CS] = col.biome;
+      ring[(x + 2) + (z + 2) * RW] = col.height;
+    }
     for (let z = 0; z < CS; z++) {
       for (let x = 0; x < CS; x++) {
         const wx = ox + x, wz = oz + z;
-        const col = column(wx, wz);
+        const col = cols[x + z * CS];
         const height = col.height, bi = col.biome, biome = BIOME_LIST[bi];
-        heights[x + z * CS] = height;
-        biomes[x + z * CS] = bi;
+        // Steepness measured over 5 blocks, so single steps in the terrain don't
+        // flip the surface back and forth between snow and rock (checkerboards).
+        const rh = (dx, dz) => ring[(x + 2 + dx) + (z + 2 + dz) * RW];
+        const slope = Math.max(Math.abs(rh(2, 0) - rh(-2, 0)), Math.abs(rh(0, 2) - rh(0, -2)),
+          Math.abs(rh(2, 2) - rh(-2, -2)) * 0.7, Math.abs(rh(2, -2) - rh(-2, 2)) * 0.7) / 2;
         const sn = nSurface.noise2(wx / 16, wz / 16);
         let top = B[biome.top.toUpperCase()], filler = B[biome.filler.toUpperCase()];
         const underwater = height < S;
@@ -634,10 +704,19 @@ export function createGenerator(seedInput) {
           top = bi === BIOME.SWAMP ? B.DIRT : sn > 0.3 ? B.GRAVEL : B.SAND; filler = B.DIRT;
         }
         if (bi === BIOME.OCEAN || bi === BIOME.RIVER) { if (sn > 0.35) { top = B.GRAVEL; filler = B.GRAVEL; } else if (sn < -0.5) { top = B.CLAY; } }
-        if (bi === BIOME.MOUNTAINS || bi === BIOME.WOODED_MOUNTAINS || bi === BIOME.SNOWY_TUNDRA || bi === BIOME.SNOWY_TAIGA) {
-          if (height > 98 + sn * 3) { top = B.SNOW; filler = B.STONE; }
-          else if (height > 84 + sn * 5 || (col.hilly > 0.8 && sn > 0.3)) { top = B.STONE; filler = B.STONE; }
-        }
+        if (MOUNTAIN_BIOMES.has(bi) || (height > S + 30 && col.rangeW > 0.2)) {
+          // Mountains: steep faces are bare rock, gentle slopes keep their soil,
+          // and above the snow line everything flat enough holds snow.
+          // slope = blocks of rise per block across (1 = 45 degrees)
+          const alt = height - S + sn * 6;
+          const snowy = bi === BIOME.SNOWY_PEAKS || (alt > 70 && biome.snowy);
+          const steep = slope > 1.5 + sn * 0.35;
+          if (steep) { top = snowy && slope < 2.2 ? B.SNOW : sn > 0.6 ? B.GRAVEL : B.STONE; filler = B.STONE; }
+          else if (snowy) { top = B.SNOW; filler = slope > 0.9 ? B.STONE : B.SNOW; }
+          else if (bi === BIOME.STONY_PEAKS) { top = slope > 0.8 || sn > 0.2 ? B.STONE : B.SNOWY_GRASS; filler = B.STONE; }
+          else if (slope > 1.1 + sn * 0.3) { top = sn > 0.5 ? B.GRAVEL : B.STONE; filler = B.STONE; }
+          else if (alt > 58 && slope < 0.8) top = B.SNOWY_GRASS;
+        } else if (slope > 2 && height > S + 6) { top = B.STONE; filler = B.STONE; } // cliffs elsewhere
         if (bi === BIOME.GIANT_TREE_TAIGA && sn > 0.4) top = B.COARSE_DIRT;
         if (bi === BIOME.SAVANNA_PLATEAU && sn > 0.45) top = B.COARSE_DIRT;
         const badlands = bi === BIOME.BADLANDS || bi === BIOME.BADLANDS_PLATEAU;
@@ -687,14 +766,14 @@ export function createGenerator(seedInput) {
 
     // ---- 4. ores and stone variants ----
     const rand = mulberry32(hash2(seed ^ 0x0e5, cx, cz) * 4294967296 >>> 0);
-    const mountainous = biomes[8 + 8 * CS] === BIOME.MOUNTAINS || biomes[8 + 8 * CS] === BIOME.WOODED_MOUNTAINS;
+    const mountainous = MOUNTAIN_BIOMES.has(biomes[8 + 8 * CS]);
     const ores = [
       // [block, veins per chunk, vein size, minY, maxY]
       [B.GRANITE, 2, 28, 5, 80], [B.DIORITE, 2, 28, 5, 80], [B.ANDESITE, 2, 28, 5, 80],
       [B.DIRT, 4, 16, 5, 80], [B.GRAVEL, 4, 16, 5, 70],
-      [B.COAL_ORE, 16, 9, 5, 110], [B.IRON_ORE, 9, 6, 5, 62], [B.GOLD_ORE, 2.5, 6, 5, 30],
+      [B.COAL_ORE, 16, 9, 5, 140], [B.IRON_ORE, 9, 6, 5, 66], [B.GOLD_ORE, 2.5, 6, 5, 30],
       [B.REDSTONE_ORE, 4, 6, 5, 16], [B.LAPIS_ORE, 1.2, 5, 8, 30], [B.DIAMOND_ORE, 1.3, 5, 4, 15],
-      [B.EMERALD_ORE, mountainous ? 4 : 0, 1, 5, 32],
+      [B.EMERALD_ORE, mountainous ? 6 : 0, 1, 5, 120],
     ];
     for (const [ore, count, size, minY, maxY] of ores) {
       let k = Math.floor(count) + (rand() < count % 1 ? 1 : 0);
@@ -749,14 +828,49 @@ export function createGenerator(seedInput) {
           }
         } else if (name === 'coarse_patch') {
           if (ground === B.GRASS) blocks[idx(x, h, z)] = B.COARSE_DIRT;
-        } else if (name === 'melon') {
-          if (SOIL.has(ground)) blocks[aboveI] = B.MELON;
+        } else if (name === 'melon' || name === 'pumpkin') {
+          if (SOIL.has(ground)) blocks[aboveI] = B[name.toUpperCase()];
         } else if (name.endsWith('mushroom')) {
           if (SOIL.has(ground)) blocks[aboveI] = B[name.toUpperCase()];
         } else if (ground === B.GRASS || ground === B.PODZOL) {
           blocks[aboveI] = B[name.toUpperCase()];
         }
         break;
+      }
+    }
+
+    // ---- 6b. sugar cane along water's edge ----
+    for (let z = 1; z < CS - 1; z++) for (let x = 1; x < CS - 1; x++) {
+      const h = heights[x + z * CS];
+      if (h < S - 1 || h > S + 1) continue;
+      const ground = blocks[idx(x, h, z)];
+      if (ground !== B.SAND && ground !== B.GRASS && ground !== B.DIRT) continue;
+      if (blocks[idx(x, h + 1, z)] !== B.AIR) continue;
+      const wet = [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => blocks[idx(x + dx, h, z + dz)] === B.WATER);
+      if (!wet || hash2(seed ^ 0x5c4e, ox + x, oz + z) > 0.12) continue;
+      const tall = 1 + Math.floor(hash2(seed ^ 0x5c4f, ox + x, oz + z) * 3);
+      for (let y = 1; y <= tall; y++) blocks[idx(x, h + y, z)] = B.SUGAR_CANE;
+    }
+
+    // ---- 6c. dungeons: a mossy room with a monster cage and loot chests ----
+    {
+      const dr = mulberry32((hash2(seed ^ 0xd0e6, cx, cz) * 4294967296) >>> 0);
+      if (dr() < 0.08) {
+        const x0 = 2 + Math.floor(dr() * 5), z0 = 2 + Math.floor(dr() * 5), y0 = 12 + Math.floor(dr() * 36);
+        const W = 7;
+        let solid = 0;
+        for (let dz = 0; dz < W; dz++) for (let dx = 0; dx < W; dx++) if (IS_SOLID[blocks[idx(x0 + dx, y0 - 1, z0 + dz)]]) solid++;
+        if (solid > 40 && y0 + 5 < heights[x0 + 3 + (z0 + 3) * CS] - 4) {
+          for (let dy = -1; dy <= 4; dy++) for (let dz = 0; dz < W; dz++) for (let dx = 0; dx < W; dx++) {
+            const edge = dx === 0 || dz === 0 || dx === W - 1 || dz === W - 1 || dy === -1 || dy === 4;
+            const i = idx(x0 + dx, y0 + dy, z0 + dz);
+            if (edge) { if (IS_SOLID[blocks[i]] || dy === -1) blocks[i] = dr() < 0.35 ? B.MOSSY_COBBLESTONE : B.COBBLESTONE; }
+            else blocks[i] = B.AIR;
+          }
+          blocks[idx(x0 + 3, y0, z0 + 3)] = B.SPAWNER;
+          blocks[idx(x0 + 1, y0, z0 + 1 + Math.floor(dr() * 5))] = B.LOOT_CHEST;
+          if (dr() < 0.5) blocks[idx(x0 + 5, y0, z0 + 1 + Math.floor(dr() * 5))] = B.LOOT_CHEST;
+        }
       }
     }
 
@@ -793,7 +907,7 @@ export function createGenerator(seedInput) {
       for (let a = 0; a < 16; a++) {
         const x = Math.round(r * Math.cos((a / 16) * Math.PI * 2)), z = Math.round(r * Math.sin((a / 16) * Math.PI * 2));
         const c = column(x, z);
-        if (c.height > S + 1 && !bad.has(c.biome) && !isCave(x, c.height, z, c.height)) {
+        if (c.height > S + 1 && c.height < S + 30 && !bad.has(c.biome) && !isCave(x, c.height, z, c.height)) {
           return { x: x + 0.5, y: c.height + 1, z: z + 0.5 };
         }
       }
@@ -801,5 +915,8 @@ export function createGenerator(seedInput) {
     return { x: 0.5, y: CH - 20, z: 0.5 };
   }
 
-  return { seed, column, generateChunk, findSpawn, villageNear };
+  /** Grow a tree from a sapling: calls put(x, y, z, id, soft) for each block. */
+  function growTree(kind, x, y, z, put) { drawFeature({ x, y, z, kind }, put); }
+
+  return { seed, column, generateChunk, findSpawn, villageNear, growTree };
 }

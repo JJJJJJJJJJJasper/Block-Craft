@@ -17,6 +17,8 @@ import { playerColors } from './skin.js';
 const MOB_KINDS = ['pig', 'zombie', 'cow', 'sheep', 'chicken', 'villager'];
 const MOB_SIZE = { pig: [0.9, 0.9], zombie: [0.6, 1.95], cow: [0.9, 1.4], sheep: [0.9, 1.3], chicken: [0.4, 0.7], villager: [0.6, 1.95] };
 const MOB_SOUND = { pig: 'oink', zombie: 'groan', cow: 'moo', sheep: 'baa', chicken: 'cluck', villager: 'hmm' };
+// Must match PROJECTILES indexes in server/projectiles.js; the item whose icon is shown in flight.
+const PROJECTILE_KINDS = ['arrow', 'snowball', 'egg', 'ender_pearl'];
 
 function lerpAngle(a, b, t) {
   let d = b - a;
@@ -193,13 +195,15 @@ function nameTag(text) {
 }
 
 export class Entities {
-  constructor(scene, iconURL, sfx) {
+  constructor(scene, iconURL, sfx, itemModels) {
+    this.itemModels = itemModels;
     this.scene = scene;
     this.iconURL = iconURL;
     this.sfx = sfx;
     this.players = new Map();
     this.mobs = new Map();
     this.items = new Map();
+    this.projectiles = new Map(); // id -> {obj, pos, vel, kind}
     this.iconTextures = new Map();
     this.myId = null;
     this.listener = { x: 0, y: 0, z: 0 };
@@ -209,12 +213,13 @@ export class Entities {
   applySnapshot(msg, names) {
     const now = performance.now();
     const seenP = new Set();
-    for (const [id, x, y, z, yaw, pitch, flags] of msg.p) {
+    for (const [id, x, y, z, yaw, pitch, flags, held] of msg.p) {
       if (id === this.myId) continue;
       seenP.add(id);
       let e = this.players.get(id);
       if (!e) e = this._addPlayer(id, names.get(id) || 'Player');
       e.buffer.push({ t: now, x, y, z, yaw, pitch, flags });
+      this._setHeld(e, held || 0);
       if (e.buffer.length > 30) e.buffer.shift();
     }
     for (const [id, e] of this.players) if (!seenP.has(id)) e.group.visible = false;
@@ -232,6 +237,46 @@ export class Entities {
     for (const [id, e] of this.mobs) {
       if (!seenM.has(id)) { this.scene.remove(e.group); this.mobs.delete(id); }
     }
+    this._applyProjectiles(msg.pr || []);
+  }
+
+  // ---- Arrows and thrown things -----------------------------------------------
+  _applyProjectiles(list) {
+    const seen = new Set();
+    for (const [id, kind, x, y, z, vx, vy, vz] of list) {
+      seen.add(id);
+      let pr = this.projectiles.get(id);
+      if (!pr) {
+        const name = PROJECTILE_KINDS[kind] || 'snowball';
+        let obj;
+        if (name === 'arrow') {
+          // a thin shaft with a dark tip and pale feathers
+          obj = new THREE.Group();
+          const shaft = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.05, 0.6), new THREE.MeshLambertMaterial({ color: 0x8b6a3c }));
+          const tip = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.08, 0.1), new THREE.MeshLambertMaterial({ color: 0x4a4a4a }));
+          tip.position.z = -0.32;
+          const fl = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.02, 0.14), new THREE.MeshLambertMaterial({ color: 0xeeeeee }));
+          fl.position.z = 0.26;
+          obj.add(shaft, tip, fl);
+        } else {
+          obj = new THREE.Sprite(new THREE.SpriteMaterial({ map: this._iconTexture(this._itemIdByName(name)), alphaTest: 0.1 }));
+          obj.scale.set(0.3, 0.3, 1);
+        }
+        this.scene.add(obj);
+        pr = { obj, pos: { x, y, z }, vel: { x: vx, y: vy, z: vz }, kind: name };
+        this.projectiles.set(id, pr);
+      }
+      pr.pos = { x, y, z }; pr.vel = { x: vx, y: vy, z: vz };
+    }
+    for (const [id, pr] of this.projectiles) {
+      if (!seen.has(id)) { this.scene.remove(pr.obj); this.projectiles.delete(id); }
+    }
+  }
+
+  _itemIdByName(name) {
+    if (!this._nameIds) this._nameIds = new Map();
+    if (!this._nameIds.has(name)) this._nameIds.set(name, this.itemIdOf ? this.itemIdOf(name) : 0);
+    return this._nameIds.get(name);
   }
 
   _distTo(x, y, z) { return Math.hypot(x - this.listener.x, y - this.listener.y, z - this.listener.z); }
@@ -247,6 +292,26 @@ export class Entities {
     const e = { ...m, tag, name, buffer: [], walk: 0 };
     this.players.set(id, e);
     return e;
+  }
+
+  /** Put item `id` (0 = nothing) in a player avatar's right hand. */
+  _setHeld(e, id) {
+    if (e.heldId === id || !this.itemModels) return;
+    e.heldId = id;
+    if (e.heldMesh) { e.armR.remove(e.heldMesh); e.heldMesh = null; }
+    if (!id) return;
+    const m = this.itemModels.create(id);
+    if (this.itemModels.isCube(id)) {
+      m.scale.setScalar(0.25);
+      m.position.set(0, -0.72, 0.12);
+      m.rotation.set(0, Math.PI / 4, 0);
+    } else {
+      m.scale.setScalar(0.5);
+      m.position.set(0, -0.72, 0.2);
+      m.rotation.set(0, -Math.PI / 4, -Math.PI / 4); // angled so it shows from the front and the side
+    }
+    e.armR.add(m);
+    e.heldMesh = m;
   }
 
   setPlayerName(id, name) {
@@ -304,6 +369,8 @@ export class Entities {
   }
 
   clear() {
+    for (const pr of this.projectiles.values()) this.scene.remove(pr.obj);
+    this.projectiles.clear();
     for (const id of [...this.players.keys()]) this.removePlayer(id);
     for (const [id, e] of this.mobs) { this.scene.remove(e.group); this.mobs.delete(id); }
     for (const id of [...this.items.keys()]) this.removeItem(id);
@@ -324,6 +391,13 @@ export class Entities {
         const sound = this.sfx[MOB_SOUND[e.kind]];
         if (sound) sound.call(this.sfx, d);
       }
+    }
+    // Projectiles fly on between snapshots (gravity only; the server decides hits).
+    for (const pr of this.projectiles.values()) {
+      pr.vel.y -= (pr.kind === 'arrow' ? 20 : 24) * dt;
+      pr.pos.x += pr.vel.x * dt; pr.pos.y += pr.vel.y * dt; pr.pos.z += pr.vel.z * dt;
+      pr.obj.position.set(pr.pos.x, pr.pos.y, pr.pos.z);
+      if (pr.kind === 'arrow') pr.obj.lookAt(pr.pos.x - pr.vel.x, pr.pos.y - pr.vel.y, pr.pos.z - pr.vel.z);
     }
     // Items: same simple physics as the server, then bob and spin.
     for (const it of this.items.values()) {
@@ -373,7 +447,8 @@ export class Entities {
     const swing = moving ? Math.sin(e.walk) * 0.7 : 0;
     if (e.legL) {
       e.legL.rotation.x = swing; e.legR.rotation.x = -swing;
-      if (isPlayer) { e.armL.rotation.x = -swing; e.armR.rotation.x = swing; }
+      // Holding something: that arm swings less and stays a little forward.
+      if (isPlayer) { e.armL.rotation.x = -swing; e.armR.rotation.x = e.heldId ? -0.35 + swing * 0.4 : swing; }
       else if (!e.zombie && !e.foldedArms) { e.armL.rotation.x = -swing * 0.5; e.armR.rotation.x = swing * 0.5; }
     }
     if (e.legs) {
@@ -390,7 +465,7 @@ export class Entities {
       const [w, h] = MOB_SIZE[e.kind];
       const p = e.group.position;
       const d = rayBox(origin, dir, [p.x - w / 2, p.y, p.z - w / 2], [p.x + w / 2, p.y + h, p.z + w / 2]);
-      if (d >= 0 && d <= maxDist && (!best || d < best.dist)) best = { id, dist: d };
+      if (d >= 0 && d <= maxDist && (!best || d < best.dist)) best = { id, dist: d, kind: e.kind };
     }
     return best;
   }

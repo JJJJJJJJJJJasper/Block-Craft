@@ -77,7 +77,8 @@ const CHUNK_FRAG = /* glsl */`
     vec3 color = tex.rgb * bright * tint * vShade;
     float fog = smoothstep(fogNear, fogFar, vDist);
     color = mix(color, fogColor, fog);
-    gl_FragColor = vec4(color, opacity);
+    // translucent blocks (water, stained glass) also use the texture's own alpha
+    gl_FragColor = vec4(color, cutout > 0.5 ? opacity : opacity * max(tex.a, 0.35));
   }
 `;
 
@@ -98,7 +99,7 @@ export class Renderer {
     container.appendChild(this.renderer.domElement);
 
     this.scene = new THREE.Scene();
-    this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.08, 1000);
+    this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.08, 1200);
     this.camera.rotation.order = 'YXZ';
     this.scene.add(this.camera);
     this.scene.fog = new THREE.Fog(0x9ec4ff, 50, 100);
@@ -154,14 +155,18 @@ export class Renderer {
 
   setRenderDistance(chunks) {
     const far = chunks * 16;
-    this.fogFar = Math.max(24, far - 6);
-    this.fogNear = this.fogFar * 0.55;
+    this.fogFar = Math.max(24, far - 4);
+    this.fogNear = this.fogFar * 0.7;
   }
 
-  /** Called every frame with the world time (0..1, 0 = sunrise). */
-  /** @param {string|null} submerged 'water', 'lava' or null: what the camera is inside */
-  updateEnvironment(timeFrac, submerged) {
-    const env = this.sky.update(timeFrac);
+  /**
+   * Called every frame.
+   * @param {number} timeFrac world time 0..1 (0 = sunrise)
+   * @param {string|null} submerged 'water', 'lava' or null: what the camera is inside
+   * @param {boolean} aurora show the aurora (snowy biome)
+   */
+  updateEnvironment(timeFrac, submerged, aurora = false) {
+    const env = this.sky.update(timeFrac, aurora);
     let fogColor = env.fogColor, near = this.fogNear, far = this.fogFar;
     const underwater = !!submerged;
     if (submerged === 'water') { fogColor = new THREE.Color(0x1d3f7a).multiplyScalar(0.4 + env.daylight * 0.6); near = 1; far = 22; }
@@ -175,8 +180,11 @@ export class Renderer {
     this.scene.fog.color.copy(fogColor);
     this.scene.fog.near = near; this.scene.fog.far = far;
     this.renderer.setClearColor(underwater ? fogColor : env.skyColor);
-    this.ambient.intensity = 0.25 + env.daylight * 0.55;
-    this.sun.intensity = 0.2 + env.daylight * 0.7;
+    this.sky.dome.visible = this.sky.clouds.visible = !underwater;
+    // Three.js lights are physically scaled: a matte (Lambert) surface needs
+    // intensity ~PI to show its full colour. Mobs and players use these lights.
+    this.ambient.intensity = Math.PI * (0.25 + env.daylight * 0.5);
+    this.sun.intensity = Math.PI * (0.1 + env.daylight * 0.35);
     this.daylight = env.daylight;
   }
 

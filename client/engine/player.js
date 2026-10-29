@@ -5,7 +5,7 @@
 // The server checks those reports and can send a correction ("teleport").
 // ============================================================================
 import { PHYSICS as P, MAX_HEALTH, MAX_HUNGER, FALL_DAMAGE_START, HUNGER_DRAIN_SECONDS } from '../../shared/config.js';
-import { moveEntity, liquidLevel, isSupported } from '../../shared/physics.js';
+import { moveEntity, liquidLevel, isSupported, onClimbable } from '../../shared/physics.js';
 import { IS_LIQUID, B } from '../../shared/blocks.js';
 
 export class Player {
@@ -21,7 +21,9 @@ export class Player {
     this.eyeOffset = 0;      // camera dips when sneaking (smoothed)
     this.inWater = 0;
     this.inLava = false;
-    this.lavaTimer = 0;        // 0..1 fraction of the body submerged
+    this.lavaTimer = 0;
+    this.jumpCooldown = 0;   // seconds until another jump is allowed while holding Space
+    this.climbing = false;        // 0..1 fraction of the body submerged
     this.headInWater = false;
     this.fallStartY = null;  // highest point since leaving the ground
     this.health = MAX_HEALTH;
@@ -102,11 +104,23 @@ export class Player {
       this.vel.z += (wishZ * speed - this.vel.z) * k;
       this.vel.y -= P.gravity * dt;
       if (this.vel.y < -P.terminalVelocity) this.vel.y = -P.terminalVelocity;
-      if (ctl.jump && this.onGround) {
+      // Holding Space only re-jumps after a short delay (like the real game),
+      // so landing on a block edge mid-jump can't launch you straight up again.
+      if (ctl.jump && this.onGround && this.jumpCooldown <= 0) {
         this.vel.y = P.jumpVelocity;
         this.onGround = false;
+        this.jumpCooldown = 0.45;
+      }
+      // Ladders and vines: climb with W or Space, hold Shift to stay put, otherwise slide down slowly.
+      this.climbing = onClimbable(this.pos, P.playerWidth, P.playerHeight, getBlock);
+      if (this.climbing) {
+        if (ctl.jump || (ctl.forward > 0 && this.moving)) this.vel.y = 2.4;
+        else if (ctl.sneak) this.vel.y = 0;
+        else this.vel.y = Math.max(this.vel.y, -2.2);
+        this.fallStartY = null;
       }
     }
+    if (this.jumpCooldown > 0) this.jumpCooldown -= dt;
 
     // Sneaking on the ground: refuse to step off an edge (like a guard rail).
     if (this.sneaking && this.onGround && this.inWater === 0) {
@@ -116,7 +130,7 @@ export class Player {
     }
 
     const wasOnGround = this.onGround;
-    const res = moveEntity(this.pos, this.vel, dt, P.playerWidth, P.playerHeight, getBlock);
+    const res = moveEntity(this.pos, this.vel, dt, P.playerWidth, P.playerHeight, getBlock, this.onGround && !this.flying);
     this.onGround = res.onGround;
     if (this.flying && this.onGround && !ctl.jump) this.flying = false; // land to stop flying
 

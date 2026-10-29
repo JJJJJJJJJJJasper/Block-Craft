@@ -2,6 +2,8 @@
 // Entry point: shows the main menu, then connects to the server and starts a
 // Game once the server has welcomed us into a world.
 // ============================================================================
+import { stateId, BLOCK_BY_NAME, FAMILIES } from '../shared/blocks.js';
+import { ITEM_BY_NAME } from '../shared/items.js';
 import { buildTextures } from './rendering/textures.js';
 import { Renderer } from './rendering/renderer.js';
 import { Network } from './net/network.js';
@@ -68,4 +70,5 @@ async function start(join) {
   game = new Game({ renderer, net, textures, settings, menus, sfx, welcome });
   window.__game = game; // handy for debugging in the browser console
   window.__BIOME_NAMES = BIOME_NAMES;
+  window.__blocks = { stateId, BLOCK_BY_NAME, FAMILIES, ITEM_BY_NAME };
 }
