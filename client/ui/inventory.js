@@ -10,7 +10,7 @@
 //   right click  pick up half / put down one
 //   shift+click  move the stack to the other section (armor goes to its slot)
 // ============================================================================
-import { ITEMS, maxStack, ARMOR_PIECES } from '../../shared/items.js';
+import { ITEMS, ITEM_BY_NAME, maxStack, ARMOR_PIECES } from '../../shared/items.js';
 import { matchRecipe } from '../../shared/recipes.js';
 import { BLOCKS } from '../../shared/blocks.js';
 import { silhouetteURL } from '../rendering/textures.js';
@@ -205,6 +205,7 @@ export class InventoryUI {
     // chests etc.: a copy of the contents; every change is sent back to the server
     this.container = kind === 'container' ? (data.slots || []).map(clone) : null;
     this.containerKind = data.kind || 'chest';
+    this.trade = kind === 'trade' ? { job: data.job, offers: data.offers || [] } : null;
     this.gridSize = kind === 'crafting' ? 3 : 2;
     this.grid = new Array(this.gridSize * this.gridSize).fill(null);
     this._build();
@@ -271,6 +272,7 @@ export class InventoryUI {
     else if (this.kind === 'crafting') this._buildCraftingTop(panel);
     else if (this.kind === 'furnace') this._buildFurnaceTop(panel);
     else if (this.kind === 'container') this._buildContainerTop(panel);
+    else if (this.kind === 'trade') this._buildTradeTop(panel);
     if (this.kind !== 'inventory') this._el('div', 'inv-label', panel, 'Inventory');
     this._buildMain(panel);
   }
@@ -331,6 +333,48 @@ export class InventoryUI {
     else if (n === 9) box.style.gridTemplateColumns = 'repeat(3, var(--slot))';
     this.els.container = [];
     for (let i = 0; i < n; i++) this.els.container[i] = this._slot(box, (b, sh) => this._containerClick(i, b, sh));
+  }
+
+  // ---- Villager trading ----
+  _buildTradeTop(panel) {
+    const job = this.trade.job;
+    this._el('div', 'inv-label', panel, `${job[0].toUpperCase()}${job.slice(1)} - click a trade to make it`);
+    const list = this._el('div', 'trade-list', panel);
+    this.els.trades = this.trade.offers.map((offer, i) => {
+      const row = this._el('div', 'trade-row', list);
+      const [gives, [getName, getCount]] = offer;
+      for (const [n, c] of gives) renderSlot(this._el('div', 'slot', row), { id: ITEM_BY_NAME[n].id, count: c }, this.cb.iconURL);
+      this._el('div', 'trade-arrow', row, '→');
+      renderSlot(this._el('div', 'slot', row), { id: ITEM_BY_NAME[getName].id, count: getCount }, this.cb.iconURL);
+      row.addEventListener('mousedown', (e) => { e.preventDefault(); e.stopPropagation(); this._doTrade(i); this.cb.click(); this.render(); });
+      return row;
+    });
+  }
+
+  /** How many of an item are in the hotbar + main inventory. */
+  _countOf(id) {
+    let n = 0;
+    for (let i = 0; i < 36; i++) if (this.inv.slots[i] && this.inv.slots[i].id === id) n += this.inv.slots[i].count;
+    return n;
+  }
+
+  _doTrade(i) {
+    const [gives, [getName, getCount]] = this.trade.offers[i];
+    if (!gives.every(([n, c]) => this._countOf(ITEM_BY_NAME[n].id) >= c)) return;
+    for (const [n, c] of gives) {
+      let left = c;
+      const id = ITEM_BY_NAME[n].id;
+      for (let k = 35; k >= 0 && left > 0; k--) {
+        const s = this.inv.slots[k];
+        if (!s || s.id !== id) continue;
+        const take = Math.min(left, s.count);
+        s.count -= take; left -= take;
+        if (s.count <= 0) this.inv.slots[k] = null;
+      }
+    }
+    const extra = this.inv.add({ id: ITEM_BY_NAME[getName].id, count: getCount, dmg: 0 });
+    if (extra > 0) this.cb.dropStack({ id: ITEM_BY_NAME[getName].id, count: extra });
+    this.inv.touch();
   }
 
   _containerClick(i, button, shift) {
@@ -398,6 +442,12 @@ export class InventoryUI {
     for (let i = 0; i < this.els.grid.length; i++) renderSlot(this.els.grid[i], this.grid[i], icon);
     if (this.els.out) renderSlot(this.els.out, this._craftResult(), icon);
     if (this.els.preview) drawPlayerPreview(this.els.preview, this.cb.playerName(), this.inv.slots);
+    if (this.kind === 'trade' && this.els.trades) {
+      this.trade.offers.forEach(([gives], i) => {
+        const ok = gives.every(([n, c]) => this._countOf(ITEM_BY_NAME[n].id) >= c);
+        this.els.trades[i].classList.toggle('affordable', ok);
+      });
+    }
     if (this.kind === 'container' && this.els.container) {
       for (let i = 0; i < this.container.length; i++) renderSlot(this.els.container[i], this.container[i], icon);
     }

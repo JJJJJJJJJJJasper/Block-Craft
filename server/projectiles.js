@@ -34,12 +34,18 @@ export class Projectiles {
     const now = Date.now();
     if (now < (p.throwCooldown || 0)) return;
     p.throwCooldown = now + 220;
-    const len = Math.hypot(...msg.dir) || 1;
     const power = msg.kind === 'arrow' ? Math.max(0.1, Math.min(1, num(msg.power) ? msg.power : 1)) : 1;
+    this.spawn(p, { x: p.pos.x, y: p.pos.y + PHYSICS.eyeHeight - 0.1, z: p.pos.z }, msg.dir, msg.kind, power);
+  }
+
+  /** Launch from any owner (a player, or a skeleton shooting at you). */
+  spawn(owner, from, dir, kind, power = 1) {
+    const def = PROJECTILES[kind];
+    const len = Math.hypot(...dir) || 1;
+    const d = dir.map(c => c / len);
     const v = def.speed * power;
-    const d = msg.dir.map(c => c / len);
-    const pos = { x: p.pos.x + d[0] * 0.4, y: p.pos.y + PHYSICS.eyeHeight - 0.1, z: p.pos.z + d[2] * 0.4 };
-    this.list.set(nextId, { id: nextId, kind: msg.kind, def, owner: p, power, pos, vel: { x: d[0] * v, y: d[1] * v, z: d[2] * v }, age: 0 });
+    const pos = { x: from.x + d[0] * 0.4, y: from.y, z: from.z + d[2] * 0.4 };
+    this.list.set(nextId, { id: nextId, kind, def, owner, power, pos, vel: { x: d[0] * v, y: d[1] * v, z: d[2] * v }, age: 0 });
     nextId++;
   }
 
@@ -59,6 +65,7 @@ export class Projectiles {
       const block = raycastBlocks((x, y, z) => room.world.getBlock(x, y, z), origin, dir, dist, solid);
       if (block) best = { t: block.dist, block };
       for (const m of room.mobs.mobs.values()) {
+        if (m === pr.owner && pr.age < 0.5) continue;
         const w = m.def.width / 2;
         const t = rayBox(origin, dir, [m.pos.x - w, m.pos.y, m.pos.z - w], [m.pos.x + w, m.pos.y + m.def.height, m.pos.z + w]);
         if (t >= 0 && t <= dist && (!best || t < best.t)) best = { t, mob: m };
@@ -82,7 +89,7 @@ export class Projectiles {
     if (pr.kind === 'arrow') {
       const dmg = Math.max(1, Math.round(pr.power * pr.power * 9));
       if (hit.mob) room.mobs.damage(hit.mob, dmg, from);
-      else if (hit.player) room.hurtPlayer(hit.player, dmg, from, `was shot by ${pr.owner.name}`);
+      else if (hit.player) room.hurtPlayer(hit.player, dmg, from, `was shot by ${pr.owner.name || 'a skeleton'}`);
       // A survival player's arrow can be picked up again where it landed.
       else if (room.mode === 'survival') room.spawnItem({ id: itemId('arrow'), count: 1 }, at.x, at.y + 0.2, at.z, { x: 0, y: 0, z: 0 });
     } else if (pr.kind === 'snowball') {
@@ -95,7 +102,7 @@ export class Projectiles {
       }
     } else if (pr.kind === 'pearl') {
       const o = pr.owner;
-      if (o.alive && room.players.has(o.id)) {
+      if (o.ws && o.alive && room.players.has(o.id)) {
         o.pos = { x: at.x, y: at.y + (hit.block && hit.block.ny === 1 ? 0.05 : 0), z: at.z };
         room._unstick(o.pos);
         o.moveCredit = 4;

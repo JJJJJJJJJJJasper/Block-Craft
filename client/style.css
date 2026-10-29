@@ -141,3 +141,10 @@ table.controls td:nth-child(odd) { color: #ffd84a; white-space: nowrap; }
   .inv-main, .inv-hotbar, .palette { grid-template-columns: repeat(9, 36px); }
   #stats { width: 340px; bottom: 54px; }
 }
+
+/* Villager trading */
+.trade-list { max-height: calc(var(--slot) * 4.2); overflow-y: auto; margin-bottom: 6px; display: flex; flex-direction: column; gap: 2px; }
+.trade-row { display: flex; align-items: center; gap: 4px; padding: 2px 4px; background: #b4b4b4; border: 2px solid #8b8b8b; cursor: pointer; opacity: 0.55; }
+.trade-row.affordable { opacity: 1; background: #c6d8b4; border-color: #6a8a4a; }
+.trade-row:hover { filter: brightness(1.08); }
+.trade-arrow { font-size: 22px; color: #404040; margin: 0 6px; }

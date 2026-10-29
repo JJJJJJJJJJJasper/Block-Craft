@@ -439,7 +439,21 @@ const PAINTERS = {
   wool(img, r, color) {
     const base = hex(color);
     fill(img, (x, y) => shade(base, (((x + (y % 2)) % 2 === 0) ? 1.04 : 0.94) * (0.94 + r() * 0.1)));
-  },  // ---- Farming ----
+  },  fire(img, r) {
+    // flickering tongues of flame: tall in the middle, yellow at the base, red at the tips
+    clear(img);
+    for (let x = 0; x < S; x++) {
+      const h = 6 + Math.floor((1 - Math.abs(x - 7.5) / 8) * 7 + r() * 4);
+      for (let y = 0; y < h; y++) {
+        const t = y / h;
+        const c = t < 0.35 ? hex('#ffe680') : t < 0.7 ? hex('#ff9a20') : hex('#e04010');
+        if (t > 0.8 && r() < 0.4) continue;
+        img.set(x, 15 - y, shade(c, 0.9 + r() * 0.2));
+      }
+    }
+  },
+
+  // ---- Farming ----
   wheat_stage(img, r, n) {
     clear(img);
     n = Number(n);

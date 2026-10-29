@@ -122,6 +122,7 @@ export class Game {
     this.input.sensitivity = s.sensitivity;
     this.sfx.setVolume(s.volume);
     this.showDebug = s.showFps;
+    this.renderer.setFancy(s.fancy !== false);
   }
 
   setTime(t) { this.time = t; this.timeSync = performance.now(); }
@@ -246,6 +247,8 @@ export class Game {
       this.containerPos = { x: m.x, y: m.y, z: m.z };
       this.openInventory('container', { pos: this.containerPos, slots: m.slots, kind: m.kind });
     });
+    net.on('phurt', (m) => { if (m.id !== this.myId) this.entities.playerHurt(m.id); });
+    net.on('trades', (m) => this.openInventory('trade', { job: m.job, offers: m.offers }));
     net.on('containerClosed', () => { if (this.invUI.isOpen && this.invUI.kind === 'container') this.invUI.close(); });
     net.on('fuse', (m) => this.sfx.fuse(Math.hypot(m.x - this.player.pos.x, m.y - this.player.pos.y, m.z - this.player.pos.z)));
     net.on('boom', (m) => {
@@ -445,8 +448,11 @@ export class Game {
     const p = this.player, input = this.input;
     const eye = p.eye, origin = [eye.x, eye.y, eye.z], dir = p.lookDir();
     const hit = raycastBlocks((x, y, z) => this.world.getBlock(x, y, z), origin, dir, REACH);
-    const mob = this.entities.raycastMobs(origin, dir, REACH);
-    const targetMob = mob && (!hit || mob.dist < hit.dist) ? mob : null;
+    const mobHit = this.entities.raycastMobs(origin, dir, REACH);
+    const playerHit = this.entities.raycastPlayers(origin, dir, REACH);
+    const mob = playerHit && (!mobHit || playerHit.dist < mobHit.dist) ? playerHit : mobHit;
+    // Tall grass, flowers etc. don't get in the way of hitting a mob or player.
+    const targetMob = mob && (!hit || mob.dist < hit.dist || BLOCKS[hit.id].replaceable) ? mob : null;
     this.renderer.setHighlight(targetMob ? null : hit);
 
     const breakDown = input.mouse.left || input.down('KeyR');
@@ -459,7 +465,7 @@ export class Game {
     if (targetMob) {
       if (breakPressed && this.attackCooldown <= 0) {
         this.attackCooldown = 0.3;
-        this.net.send({ t: 'attack', mob: targetMob.id, held: this.inv.heldId });
+        this.net.send(targetMob.player ? { t: 'attack', player: targetMob.id, held: this.inv.heldId } : { t: 'attack', mob: targetMob.id, held: this.inv.heldId });
         this.hand.doSwing();
         if (this.mode === 'survival' && this.inv.held && ITEMS[this.inv.held.id].tool) this._wearTool();
       }
@@ -508,7 +514,7 @@ export class Game {
     this.bowCharge = 0;
 
     // Use / place.
-    if (targetMob && usePressed) this.useOnMob(targetMob);
+    if (targetMob && usePressed && !targetMob.player) this.useOnMob(targetMob);
     else if ((usePressed || (useDown && this.placeCooldown <= 0)) && !targetMob) {
       this.placeCooldown = 0.25;
       this.use(hit, usePressed);
@@ -548,6 +554,7 @@ export class Game {
 
   useOnMob(mob) {
     const held = this.inv.held, def = held && ITEMS[held.id];
+    if (mob.kind === 'villager') { this.net.send({ t: 'useMob', mob: mob.id, held: held ? held.id : 0 }); return; }
     if (!def) return;
     if (mob.kind === 'cow' && def.name === 'bucket') { this._swapHeld('milk_bucket'); this.hand.doSwing(); this.sfx.place('cloth'); return; }
     if (mob.kind === 'sheep' && def.name === 'shears') {
@@ -624,9 +631,20 @@ export class Game {
         if (survival) this.inv.consumeHeld(1);
         return this._sendUse('bonemeal', hit.x, hit.y, hit.z);
       }
-      if (heldDef.name === 'flint_and_steel' && hit.id === FAMILIES.tnt.baseId) {
+      if (heldDef.name === 'flint_and_steel') {
+        // TNT gets lit; anything else catches fire on the face you clicked.
+        if (hit.id === FAMILIES.tnt.baseId) {
+          if (survival) this._wearTool();
+          this.sfx.fuse(0);
+          return this._sendUse('ignite', hit.x, hit.y, hit.z);
+        }
+        const fx = hit.x + hit.nx, fy = hit.y + hit.ny, fz = hit.z + hit.nz;
+        const cur = get(fx, fy, fz);
+        if (cur !== 0 && !(BLOCKS[cur].replaceable && !BLOCKS[cur].liquid)) return;
+        this.world.setBlock(fx, fy, fz, FAMILIES.fire.baseId, true);
         if (survival) this._wearTool();
-        return this._sendUse('ignite', hit.x, hit.y, hit.z);
+        this.sfx.fuse(0);
+        return this._sendUse('ignite', fx, fy, fz);
       }
     }
 
@@ -735,7 +753,9 @@ export class Game {
     const p = this.player;
     const dx = p.pos.x - from[0], dz = p.pos.z - from[2];
     const len = Math.hypot(dx, dz) || 1;
-    p.vel.x += (dx / len) * 7; p.vel.z += (dz / len) * 7; p.vel.y = 5;
+    // Knockback: a shove away from the attacker; for a moment you can't steer against it.
+    p.vel.x = (dx / len) * 9; p.vel.z = (dz / len) * 9; p.vel.y = 6;
+    p.knockTimer = 0.35;
     if (this.mode !== 'survival') return;
     // Each armor point blocks 4% of the damage (20 points = 80%).
     const points = Math.min(20, this.inv.armorPoints());

@@ -9,11 +9,11 @@ import { BLOCKS, COLORS } from './blocks.js';
 
 // Tool tiers: speed multiplies mining speed, level decides what can be harvested.
 export const TOOL_TIERS = {
-  wood:    { level: 1, speed: 2, durability: 60,   damage: 0, color: '#9c7a45' },
-  stone:   { level: 2, speed: 4, durability: 132,  damage: 1, color: '#8a8a8a' },
-  iron:    { level: 3, speed: 6, durability: 251,  damage: 2, color: '#d8d8d8' },
-  gold:    { level: 1, speed: 12, durability: 33,  damage: 0, color: '#f5d742' },
-  diamond: { level: 4, speed: 8, durability: 1562, damage: 3, color: '#5ee8e0' },
+  wood:    { level: 1, speed: 2, durability: 200,  damage: 0, color: '#9c7a45' },
+  stone:   { level: 2, speed: 4, durability: 450,  damage: 1, color: '#8a8a8a' },
+  iron:    { level: 3, speed: 6, durability: 1100, damage: 2, color: '#d8d8d8' },
+  gold:    { level: 1, speed: 12, durability: 600, damage: 0, color: '#f5d742' },
+  diamond: { level: 4, speed: 8, durability: 4000, damage: 3, color: '#5ee8e0' },
 };
 
 // Armor: protection points per piece [helmet, chestplate, leggings, boots] and

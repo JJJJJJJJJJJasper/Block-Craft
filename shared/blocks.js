@@ -439,6 +439,10 @@ cube('grass_path', { tex: { top: 'grass_path_top', side: 'grass_path_side', bott
 cube('chiseled_quartz_block', { tex: { top: 'polished:#ece6df', side: 'chiseled_quartz' }, hardness: 0.8, tool: 'pickaxe', harvest: 1, sound: 'stone', cat: 'building' });
 cube('wet_sponge', { tex: { all: 'sponge:wet' }, hardness: 0.6, sound: 'grass', cat: 'decoration' });
 
+// ---- 11. Fire (lit with flint and steel; burns out after a few seconds) -----------------
+family('fire', [[{}, { solid: false, opaque: false, transparent: true, cutout: true, lightOpacity: 0, light: 15, shape: 'cross',
+  tex: { all: 'fire' }, hardness: 0, drops: null, replaceable: true, hidden: true, placeable: true, sound: 'grass', support: 'below', burns: true }]]);
+
 // ---- Defaults and lookup tables -----------------------------------------------------------
 const DEFAULTS = {
   solid: true, opaque: true, transparent: false, cutout: false, translucent: false, liquid: false,

@@ -42,7 +42,7 @@ export const SERVER_REACH_SLACK = 2;    // extra tolerance for latency on the se
 // ---- Time --------------------------------------------------------------------
 // One full day/night cycle. The world clock runs from 0 to DAY_TICKS.
 // 0 = sunrise, 0.25 = noon, 0.5 = sunset, 0.75 = midnight (as a fraction).
-export const DAY_LENGTH_SECONDS = 20 * 60;
+export const DAY_LENGTH_SECONDS = 10 * 60; // 5 minutes of day, then 5 minutes of night
 export const DAY_TICKS = 24000;
 
 // ---- Survival ----------------------------------------------------------------

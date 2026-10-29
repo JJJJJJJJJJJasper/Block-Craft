@@ -227,7 +227,7 @@ export class Sky {
     this.uniforms.moonDir.value.copy(sunDir).multiplyScalar(-1);
     const height = sunDir.y;
     // Daylight: 1 at day, ~0.28 at night (moonlight), smooth transition around sunrise/sunset.
-    const daylight = THREE.MathUtils.clamp(0.28 + (height + 0.15) * 2.2, 0.28, 1);
+    const daylight = THREE.MathUtils.clamp(0.38 + (height + 0.15) * 2.2, 0.38, 1); // bright moonlit nights
 
     const dayAmt = THREE.MathUtils.smoothstep(height, -0.22, 0.3);
     const dusk = Math.max(0, 1 - Math.abs(height + 0.03) * 4.5); // peaks just as the sun touches the horizon

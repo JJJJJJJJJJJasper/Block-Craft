@@ -38,7 +38,8 @@ export class Interactions {
     this.room = room;
     this.containers = new Map(Object.entries(saved.containers ?? {})); // "x,y,z" -> slots
     this.plants = new Set(saved.plants ?? []);                         // growing crops, saplings, cane
-    this.tnt = [];                                                     // lit TNT: {x, y, z, t}
+    this.tnt = [];
+    this.fires = [];                                                   // burning fire blocks: {x, y, z, t}                                                     // lit TNT: {x, y, z, t}
     this.growTimer = 0;
   }
 
@@ -130,7 +131,19 @@ export class Interactions {
       }
       case 'bonemeal': return held && held.name === 'bone_meal' ? this.boneMeal(x, y, z, id) : undefined;
       case 'ignite': {
-        if (held && held.name === 'flint_and_steel' && id === FAMILIES.tnt.baseId) this.light(x, y, z, 4);
+        if (!held || held.name !== 'flint_and_steel') return;
+        if (id === FAMILIES.tnt.baseId) return this.light(x, y, z, 4);
+        // Start a fire in an empty spot, if there's something next to it to burn on.
+        if (id !== 0 && !(b.replaceable && !b.liquid)) return;
+        const nearSolid = [[0, -1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0]]
+          .some(([dx, dy, dz]) => IS_SOLID[this.world.getBlock(x + dx, y + dy, z + dz)]);
+        if (!nearSolid) return room._reject(p, x, y, z);
+        room.setBlock(x, y, z, FAMILIES.fire.baseId);
+        this.fires.push({ x, y, z, t: 4 + Math.random() * 4 });
+        // Fire touching TNT sets it off.
+        for (const [dx, dy, dz] of [[0, -1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0]]) {
+          if (this.world.getBlock(x + dx, y + dy, z + dz) === FAMILIES.tnt.baseId) this.light(x + dx, y + dy, z + dz, 4);
+        }
         return;
       }
       case 'fill': {
@@ -285,6 +298,14 @@ export class Interactions {
           if (h >= 3) this.plants.delete(k);
         } else this.plants.delete(k);
       }
+    }
+    // Fires burn out after a few seconds.
+    if (this.fires.length) {
+      this.fires = this.fires.filter(f => {
+        if ((f.t -= dt) > 0) return true;
+        if (this.world.getBlock(f.x, f.y, f.z) === FAMILIES.fire.baseId) this.room.setBlock(f.x, f.y, f.z, 0);
+        return false;
+      });
     }
     // Lit TNT counts down, then explodes.
     if (this.tnt.length) {

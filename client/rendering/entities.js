@@ -12,11 +12,13 @@ import { INTERP_DELAY_MS } from '../../shared/config.js';
 import { moveEntity } from '../../shared/physics.js';
 import { rayBox } from '../../shared/raycast.js';
 import { playerColors } from './skin.js';
+import { PROFESSIONS, PROFESSION_COLORS } from '../../shared/trades.js';
 
 // Must match the order of MOB_TYPES indexes in server/mobs.js.
-const MOB_KINDS = ['pig', 'zombie', 'cow', 'sheep', 'chicken', 'villager'];
-const MOB_SIZE = { pig: [0.9, 0.9], zombie: [0.6, 1.95], cow: [0.9, 1.4], sheep: [0.9, 1.3], chicken: [0.4, 0.7], villager: [0.6, 1.95] };
-const MOB_SOUND = { pig: 'oink', zombie: 'groan', cow: 'moo', sheep: 'baa', chicken: 'cluck', villager: 'hmm' };
+const MOB_KINDS = ['pig', 'zombie', 'cow', 'sheep', 'chicken', 'villager', 'skeleton', 'spider', 'rumbler'];
+const MOB_SIZE = { pig: [0.9, 0.9], zombie: [0.6, 1.95], cow: [0.9, 1.4], sheep: [0.9, 1.3], chicken: [0.4, 0.7], villager: [0.6, 1.95],
+  skeleton: [0.6, 1.95], spider: [1.3, 0.9], rumbler: [0.7, 1.4] };
+const MOB_SOUND = { pig: 'oink', zombie: 'groan', cow: 'moo', sheep: 'baa', chicken: 'cluck', villager: 'hmm', skeleton: 'rattle', spider: 'hiss', rumbler: 'rumble' };
 // Must match PROJECTILES indexes in server/projectiles.js; the item whose icon is shown in flight.
 const PROJECTILE_KINDS = ['arrow', 'snowball', 'egg', 'ender_pearl'];
 
@@ -55,8 +57,13 @@ function humanoid(skin, shirt, pants, eye = '#3355aa') {
   const faceM = new THREE.MeshLambertMaterial({ map: faceTexture(skin, eye) });
   const g = new THREE.Group();
   // BoxGeometry material order: +x, -x, +y, -y, +z (front), -z
-  const head = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.5, 0.5), [skinM, skinM, skinM, skinM, faceM, skinM]);
-  head.position.y = 1.5 + 0.25;
+  // The head turns around a pivot at the neck (its bottom centre), so looking up
+  // or down tilts it on the shoulders instead of spinning it around its middle.
+  const head = new THREE.Group();
+  head.position.y = 1.5;
+  const headBox = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.5, 0.5), [skinM, skinM, skinM, skinM, faceM, skinM]);
+  headBox.position.y = 0.25;
+  head.add(headBox);
   const body = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.75, 0.25), shirtM);
   body.position.y = 1.125;
   const armL = limb(0.25, 0.75, 0.25, skinM); armL.position.set(0.375, 1.5, 0);
@@ -73,12 +80,13 @@ function humanoid(skin, shirt, pants, eye = '#3355aa') {
 }
 
 /** Villager: a robed humanoid with a big nose and folded arms. */
-function villagerModel() {
-  const m = humanoid('#c69472', '#6b4a2b', '#5a3d22', '#2a6a2a');
+function villagerModel(job = 'farmer') {
+  const [robeC, pantsC] = PROFESSION_COLORS[job] || PROFESSION_COLORS.farmer;
+  const m = humanoid('#c69472', robeC, pantsC, '#2a6a2a');
   const robe = new THREE.Mesh(new THREE.BoxGeometry(0.52, 0.6, 0.3), m.materials[1]);
   robe.position.y = 0.55;
   const nose = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.2, 0.1), m.materials[0]);
-  nose.position.set(0, -0.08, 0.3);
+  nose.position.set(0, 0.17, 0.3);
   m.head.add(nose);
   m.group.add(robe);
   m.armL.rotation.x = m.armR.rotation.x = -0.9;
@@ -178,6 +186,101 @@ function pigModel() {
   return { group: g, head, legs, materials: [pink, dark, faceM] };
 }
 
+/** Skeleton: a thin, bony humanoid with dark eye sockets. */
+function skeletonModel() {
+  const bone = new THREE.MeshLambertMaterial({ color: 0xd9d4c4 });
+  const c = document.createElement('canvas');
+  c.width = c.height = 8;
+  const x = c.getContext('2d');
+  x.fillStyle = '#d9d4c4'; x.fillRect(0, 0, 8, 8);
+  x.fillStyle = '#2a2622'; x.fillRect(1, 2, 2, 2); x.fillRect(5, 2, 2, 2); x.fillRect(3, 5, 2, 1);
+  x.fillStyle = '#8a8478'; x.fillRect(1, 6, 6, 1);
+  const t = new THREE.CanvasTexture(c); t.magFilter = t.minFilter = THREE.NearestFilter;
+  const faceM = new THREE.MeshLambertMaterial({ map: t });
+  const g = new THREE.Group();
+  const head = new THREE.Group(); head.position.y = 1.5;
+  const skull = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.46, 0.46), [bone, bone, bone, bone, faceM, bone]);
+  skull.position.y = 0.24; head.add(skull);
+  // ribcage: a spine with three ribs
+  const spine = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.75, 0.1), bone); spine.position.y = 1.125;
+  const ribs = [1.4, 1.25, 1.1].map(y => { const r = new THREE.Mesh(new THREE.BoxGeometry(0.44, 0.07, 0.2), bone); r.position.y = y; return r; });
+  const pelvis = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.1, 0.18), bone); pelvis.position.y = 0.8;
+  const armL = limb(0.1, 0.75, 0.1, bone); armL.position.set(0.3, 1.45, 0);
+  const armR = limb(0.1, 0.75, 0.1, bone); armR.position.set(-0.3, 1.45, 0);
+  const legL = limb(0.1, 0.75, 0.1, bone); legL.position.set(0.12, 0.75, 0);
+  const legR = limb(0.1, 0.75, 0.1, bone); legR.position.set(-0.12, 0.75, 0);
+  // a little bow in the right hand
+  const bowM = new THREE.MeshLambertMaterial({ color: 0x7a5530 });
+  const bow = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.6, 0.05), bowM); bow.position.set(0, -0.7, 0.12); armR.add(bow);
+  g.add(head, spine, ...ribs, pelvis, armL, armR, legL, legR);
+  armL.rotation.x = armR.rotation.x = -Math.PI / 2;
+  return { group: g, head, armL, armR, legL, legR, materials: [bone, faceM, bowM], zombie: true };
+}
+
+/** Spider: a low, round-backed body, eight jointed legs and a cluster of red eyes. */
+function spiderModel() {
+  const dark = new THREE.MeshLambertMaterial({ color: 0x2e2622 });
+  const fur = new THREE.MeshLambertMaterial({ color: 0x45382f });
+  const eyeM = new THREE.MeshBasicMaterial({ color: 0xff2a1a });
+  const g = new THREE.Group();
+  const abdomen = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.6, 0.85), fur); abdomen.position.set(0, 0.6, -0.45);
+  const thorax = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.4, 0.45), dark); thorax.position.set(0, 0.5, 0.1);
+  const head = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.45, 0.4), dark); head.position.set(0, 0.52, 0.5);
+  for (const [ex, ey] of [[-0.15, 0.08], [0.15, 0.08], [-0.07, 0.15], [0.07, 0.15], [-0.2, -0.02], [0.2, -0.02]]) {
+    const e = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.07, 0.02), eyeM); e.position.set(ex, ey, 0.21); head.add(e);
+  }
+  const legs = [];
+  for (let i = 0; i < 4; i++) for (const side of [1, -1]) {
+    const pivot = new THREE.Group();
+    pivot.position.set(0.22 * side, 0.55, 0.3 - i * 0.18);
+    const upper = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.08, 0.08), dark);
+    upper.position.set(0.3 * side, 0.12, 0); upper.rotation.z = 0.4 * side;
+    const lower = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.6, 0.08), dark);
+    lower.position.set(0.58 * side, -0.12, 0);
+    pivot.add(upper, lower);
+    pivot.rotation.y = (i - 1.5) * 0.25 * side;
+    legs.push(pivot); g.add(pivot);
+  }
+  g.add(abdomen, thorax, head);
+  return { group: g, head, legs, materials: [dark, fur] };
+}
+
+/** Rumbler: BlockCraft's own exploding monster. A squat stone beast with glowing
+ *  cracks, two ember eyes and a fuse on its back that fizzes when it gets close. */
+function rumblerModel() {
+  const c = document.createElement('canvas');
+  c.width = c.height = 16;
+  const x = c.getContext('2d');
+  x.fillStyle = '#6b6258'; x.fillRect(0, 0, 16, 16);
+  for (let i = 0; i < 40; i++) { x.fillStyle = Math.random() < 0.5 ? '#5a524a' : '#7a7066'; x.fillRect(Math.random() * 16 | 0, Math.random() * 16 | 0, 2, 1); }
+  x.fillStyle = '#ff8a1a';   // glowing cracks
+  for (const [cx, cy, len, dx] of [[3, 2, 6, 1], [11, 4, 7, -1], [6, 10, 5, 1]]) for (let k = 0; k < len; k++) x.fillRect(cx + (k * dx) / 2, cy + k, 1, 1);
+  const tex = new THREE.CanvasTexture(c); tex.magFilter = tex.minFilter = THREE.NearestFilter;
+  const stone = new THREE.MeshLambertMaterial({ map: tex });
+  const fc = document.createElement('canvas');
+  fc.width = fc.height = 8;
+  const f = fc.getContext('2d');
+  f.drawImage(c, 0, 0, 16, 16, 0, 0, 8, 8);
+  f.fillStyle = '#1e1a16'; f.fillRect(1, 2, 2, 2); f.fillRect(5, 2, 2, 2); f.fillRect(2, 5, 4, 2);
+  f.fillStyle = '#ffb030'; f.fillRect(2, 3, 1, 1); f.fillRect(5, 3, 1, 1); f.fillRect(3, 6, 2, 1);
+  const ft = new THREE.CanvasTexture(fc); ft.magFilter = ft.minFilter = THREE.NearestFilter;
+  const faceM = new THREE.MeshLambertMaterial({ map: ft });
+  const g = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.75, 0.8, 0.6), [stone, stone, stone, stone, faceM, stone]);
+  body.position.y = 0.75;
+  const brow = new THREE.Mesh(new THREE.BoxGeometry(0.85, 0.15, 0.7), stone); brow.position.y = 1.2;
+  const fuse = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.3, 0.06), new THREE.MeshLambertMaterial({ color: 0x3a2a1a }));
+  fuse.position.set(0.15, 1.42, -0.15); fuse.rotation.z = -0.3;
+  const spark = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.1, 0.1), new THREE.MeshBasicMaterial({ color: 0xffd040 }));
+  spark.position.set(0.2, 1.58, -0.15);
+  const legs = [];
+  for (const [lx, lz] of [[0.22, 0.18], [-0.22, 0.18], [0.22, -0.18], [-0.22, -0.18]]) {
+    const l = limb(0.22, 0.35, 0.22, stone); l.position.set(lx, 0.35, lz); legs.push(l); g.add(l);
+  }
+  g.add(body, brow, fuse, spark);
+  return { group: g, head: body, legs, spark, materials: [stone, faceM] };
+}
+
 function nameTag(text) {
   const c = document.createElement('canvas');
   const ctx = c.getContext('2d');
@@ -228,11 +331,12 @@ export class Entities {
     for (const [id, kind, x, y, z, yaw, hurt] of msg.m) {
       seenM.add(id);
       let e = this.mobs.get(id);
-      if (!e) e = this._addMob(id, MOB_KINDS[kind] || 'pig', x, y, z);
+      if (!e) e = this._addMob(id, MOB_KINDS[kind] || 'pig', x, y, z, PROFESSIONS[(hurt >> 2) & 7]);
       e.buffer.push({ t: now, x, y, z, yaw, pitch: 0, flags: 0 });
       if (e.buffer.length > 30) e.buffer.shift();
-      if (hurt && !e.hurt) this.sfx.mobHurt(this._distTo(x, y, z));
-      e.hurt = !!hurt;
+      if ((hurt & 1) && !e.hurt) this.sfx.mobHurt(this._distTo(x, y, z));
+      e.hurt = !!(hurt & 1);
+      e.fusing = !!(hurt & 2);
     }
     for (const [id, e] of this.mobs) {
       if (!seenM.has(id)) { this.scene.remove(e.group); this.mobs.delete(id); }
@@ -324,14 +428,24 @@ export class Entities {
     e.name = name;
   }
 
+  /** Another player got hit: flash their avatar and play a sound. */
+  playerHurt(id) {
+    const e = this.players.get(id);
+    if (!e) return;
+    e.hurtUntil = performance.now() + 350;
+    const p = e.group.position;
+    this.sfx.hurt(this._distTo(p.x, p.y, p.z));
+  }
+
   removePlayer(id) {
     const e = this.players.get(id);
     if (e) { this.scene.remove(e.group); this.players.delete(id); }
   }
 
-  _addMob(id, kind, x, y, z) {
-    const make = { zombie: () => humanoid('#5f9b4c', '#2f8c8c', '#3b3f8f', '#111111'), cow: cowModel, sheep: sheepModel, chicken: chickenModel, villager: villagerModel };
-    const m = (make[kind] || pigModel)();
+  _addMob(id, kind, x, y, z, job) {
+    const make = { zombie: () => humanoid('#5f9b4c', '#2f8c8c', '#3b3f8f', '#111111'), cow: cowModel, sheep: sheepModel, chicken: chickenModel, villager: villagerModel,
+      skeleton: skeletonModel, spider: spiderModel, rumbler: rumblerModel };
+    const m = kind === 'villager' ? villagerModel(job) : (make[kind] || pigModel)();
     if (kind === 'zombie') { m.armL.rotation.x = -Math.PI / 2; m.armR.rotation.x = -Math.PI / 2; m.zombie = true; }
     m.group.position.set(x, y, z);
     this.scene.add(m.group);
@@ -379,11 +493,19 @@ export class Entities {
   // ---- Per-frame update ------------------------------------------------------------
   update(dt, getBlock) {
     const renderTime = performance.now() - INTERP_DELAY_MS;
-    for (const e of this.players.values()) this._interpolate(e, renderTime, dt, true);
+    for (const e of this.players.values()) {
+      this._interpolate(e, renderTime, dt, true);
+      // flash red for a moment after being hit
+      const red = e.hurtUntil && performance.now() < e.hurtUntil ? 0.6 : 0;
+      if (e.materials) for (const m of e.materials) if (m.emissive) m.emissive.setRGB(red, 0, 0);
+    }
     for (const e of this.mobs.values()) {
       this._interpolate(e, renderTime, dt, false);
       // Hurt flash: tint red.
-      for (const m of e.materials) m.emissive.setRGB(e.hurt ? 0.6 : 0, 0, 0);
+      // Hurt flash: tint red. A Rumbler about to blow flashes white.
+      const flash = e.fusing && Math.sin(performance.now() / 70) > 0 ? 0.7 : 0;
+      for (const m of e.materials) if (m.emissive) m.emissive.setRGB(e.hurt ? 0.6 : flash, flash, flash);
+      if (e.spark) e.spark.visible = !e.fusing || Math.random() < 0.7;
       e.soundTimer -= dt;
       if (e.soundTimer < 0) {
         e.soundTimer = 6 + Math.random() * 10;
@@ -438,7 +560,9 @@ export class Entities {
       const crouch = (c.flags & 4) !== 0;
       e.body.rotation.x = crouch ? 0.45 : 0;
       e.body.position.z = crouch ? 0.12 : 0;
-      e.head.position.y = crouch ? 1.55 : 1.75;
+      // keep the neck on top of the leaning body
+      e.head.position.y = crouch ? 1.46 : 1.5;
+      e.head.position.z = crouch ? 0.28 : 0;
       e.group.position.y -= crouch ? 0.12 : 0;
     }
     // Walking animation: swing limbs with a sine wave scaled by speed.
@@ -453,7 +577,7 @@ export class Entities {
     }
     if (e.legs) {
       // Diagonal pairs move together (2-legged chickens just alternate).
-      const pattern = e.legs.length === 2 ? [1, -1] : [1, -1, -1, 1];
+      const pattern = e.legs.length === 2 ? [1, -1] : e.legs.length === 8 ? [1, -1, -1, 1, 1, -1, -1, 1] : [1, -1, -1, 1];
       e.legs.forEach((leg, i) => { leg.rotation.x = swing * pattern[i]; });
     }
   }
@@ -466,6 +590,19 @@ export class Entities {
       const p = e.group.position;
       const d = rayBox(origin, dir, [p.x - w / 2, p.y, p.z - w / 2], [p.x + w / 2, p.y + h, p.z + w / 2]);
       if (d >= 0 && d <= maxDist && (!best || d < best.dist)) best = { id, dist: d, kind: e.kind };
+    }
+    return best;
+  }
+
+  /** Closest other player hit by a ray, or null (for PvP). */
+  raycastPlayers(origin, dir, maxDist) {
+    let best = null;
+    for (const [id, e] of this.players) {
+      if (!e.group.visible) continue;
+      const p = e.group.position;
+      // a slightly generous box, so fast-moving players are still easy to hit
+      const d = rayBox(origin, dir, [p.x - 0.45, p.y - 0.1, p.z - 0.45], [p.x + 0.45, p.y + 2.0, p.z + 0.45]);
+      if (d >= 0 && d <= maxDist && (!best || d < best.dist)) best = { id, dist: d, player: true };
     }
     return best;
   }

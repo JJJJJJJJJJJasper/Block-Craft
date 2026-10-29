@@ -368,6 +368,7 @@ export class Room {
   }
 
   onAttack(p, msg) {
+    if (msg.player !== undefined) return this.onAttackPlayer(p, msg);
     const m = this.mobs.mobs.get(msg.mob);
     if (!m || !p.alive) return;
     const now = Date.now();
@@ -377,6 +378,19 @@ export class Room {
     if (d > REACH + SERVER_REACH_SLACK + 1) return;
     const held = int(msg.held) ? msg.held : 0;
     this.mobs.damage(m, attackDamage(held), p.pos);
+  }
+
+  /** PvP: in survival, players can hit each other (with knockback, armor still helps). */
+  onAttackPlayer(p, msg) {
+    const o = this.players.get(msg.player);
+    if (!o || o === p || !p.alive || !o.alive || this.mode !== 'survival') return;
+    const now = Date.now();
+    if (now < p.attackCooldown) return;
+    p.attackCooldown = now + 350;
+    const d = Math.hypot(o.pos.x - p.pos.x, o.pos.y - p.pos.y, o.pos.z - p.pos.z);
+    if (d > REACH + SERVER_REACH_SLACK + 1) return;
+    const held = int(msg.held) ? msg.held : 0;
+    this.hurtPlayer(o, attackDamage(held), p.pos, `was slain by ${p.name}`);
   }
 
   // ---- Items ------------------------------------------------------------------
@@ -443,6 +457,7 @@ export class Room {
   hurtPlayer(p, amount, from, cause = 'was slain by a zombie') {
     if (this.mode !== 'survival' || !p.alive || amount <= 0) return;
     this.send(p, { t: 'hurt', amount, from: [from.x, from.y, from.z], cause });
+    this.broadcast({ t: 'phurt', id: p.id }, p); // others see the red flash
   }
 
   onDied(p, msg) {
@@ -497,7 +512,7 @@ export class Room {
       this.mode = msg.value;
       this.broadcast({ t: 'mode', mode: this.mode });
       this.sys(`Game mode is now ${this.mode}`);
-      if (this.mode === 'creative') for (const m of [...this.mobs.mobs.values()]) if (m.type === 'zombie') this.mobs.mobs.delete(m.id);
+      if (this.mode === 'creative') for (const m of [...this.mobs.mobs.values()]) if (m.def.hostile) this.mobs.mobs.delete(m.id);
       this.dirty = true;
     } else if (msg.action === 'time' && num(msg.value)) {
       this.time = ((Math.floor(msg.value) % DAY_TICKS) + DAY_TICKS) % DAY_TICKS;

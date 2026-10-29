@@ -122,7 +122,26 @@ export function createGenerator(seedInput) {
     const mushW = smoothstep(0.55, 0.68, M) * (1 - smoothstep(-0.42, -0.36, C));
     h = lerp(h, S + 3 + D * 5, mushW);
     // Rivers cut channels where the river noise crosses zero.
-    const riverW = (1 - smoothstep(0.01, 0.032, Math.abs(R))) * land * (1 - mushW) * (1 - plateauW * 0.6) * (1 - rangeW * 0.9);
+    // Rivers. Work out roughly how many blocks this column is from the river's
+    // centre line (R = 0) using how fast R changes here, then:
+    //   - within ~4 blocks: the channel, cut down below sea level
+    //   - further out: the banks may only rise about 1 block for every 2 blocks
+    //     away from the water, so you can always walk out of a river.
+    const aR = Math.abs(R);
+    const bankFade = land * (1 - mushW) * (1 - plateauW * 0.6);
+    const riverFade = bankFade * (1 - rangeW * 0.9);
+    let riverW = 0;
+    if (aR < 0.16 && bankFade > 0) {
+      const gx = nRiver.fbm2((x + 1) / 1100, z / 1100, 4) - R;
+      const gz = nRiver.fbm2(x / 1100, (z + 1) / 1100, 4) - R;
+      const d = aR / Math.max(1e-6, Math.hypot(gx, gz)); // blocks from the river's centre
+      riverW = (1 - smoothstep(2.5, 6, d)) * riverFade;
+      // the bank starts level with the water, then climbs gently
+      const bank = S + Math.max(0, d - 5) * 0.5;
+      // (in mountains the gentle part only reaches ~20 blocks out, then the peaks take over)
+      const w = bankFade * (1 - smoothstep(0.09, 0.16, aR)) * (1 - rangeW * smoothstep(12, 30, d));
+      if (h > bank) h = lerp(h, bank, w);
+    }
     if (h > S - 3) h = lerp(h, S - 3, riverW);
     const height = Math.floor(clamp(h, 4, CH - 14));
     const alt = height - S;
@@ -491,10 +510,14 @@ export function createGenerator(seedInput) {
   const villageCache = new Map();
 
   const STYLES = {
-    plains: { wall: B.PLANKS, frame: B.LOG, base: B.COBBLESTONE, roof: B.PLANKS, road: B.GRAVEL },
-    taiga: { wall: B.SPRUCE_PLANKS, frame: B.SPRUCE_LOG, base: B.COBBLESTONE, roof: B.SPRUCE_PLANKS, road: B.GRAVEL },
-    savanna: { wall: B.ACACIA_PLANKS, frame: B.ACACIA_LOG, base: B.COBBLESTONE, roof: B.ACACIA_PLANKS, road: B.GRAVEL },
-    desert: { wall: B.SANDSTONE, frame: B.SMOOTH_SANDSTONE, base: B.SANDSTONE, roof: B.SMOOTH_SANDSTONE, road: B.SMOOTH_SANDSTONE },
+    plains: { wall: B.PLANKS, frame: B.LOG, log: 'log', base: B.COBBLESTONE, road: B.GRASS_PATH,
+      stairs: 'oak_stairs', slab: 'oak_slab', door: 'oak_door', fence: B.OAK_FENCE, gate: 'oak_fence_gate' },
+    taiga: { wall: B.SPRUCE_PLANKS, frame: B.SPRUCE_LOG, log: 'spruce_log', base: B.COBBLESTONE, road: B.GRASS_PATH,
+      stairs: 'spruce_stairs', slab: 'spruce_slab', door: 'spruce_door', fence: B.SPRUCE_FENCE, gate: 'spruce_fence_gate' },
+    savanna: { wall: B.ACACIA_PLANKS, frame: B.ACACIA_LOG, log: 'acacia_log', base: B.COBBLESTONE, road: B.GRASS_PATH,
+      stairs: 'acacia_stairs', slab: 'acacia_slab', door: 'acacia_door', fence: B.ACACIA_FENCE, gate: 'acacia_fence_gate' },
+    desert: { wall: B.SANDSTONE, frame: B.SMOOTH_SANDSTONE, log: 'log', base: B.SANDSTONE, road: B.SMOOTH_SANDSTONE,
+      stairs: 'sandstone_stairs', slab: 'sandstone_slab', door: 'oak_door', fence: B.OAK_FENCE, gate: 'oak_fence_gate' },
   };
   const styleFor = (biome) => (biome === BIOME.DESERT ? STYLES.desert : biome === BIOME.SAVANNA ? STYLES.savanna
     : biome === BIOME.TAIGA || biome === BIOME.SNOWY_TUNDRA ? STYLES.taiga : STYLES.plains);
@@ -535,75 +558,155 @@ export function createGenerator(seedInput) {
       placed.push(box);
       const fy = ground + 1;
       const put = (u, y, v, id, mode = OP_SET) => op(toX(u, v), fy + y, toZ(u, v), id, mode);
+      // world facing for a local direction (du along the road, dv away from it)
+      const face = (du, dv) => FACING_OF[`${du * ax + dv * px},${du * az + dv * pz}`];
       for (let v = 0; v < d; v++) for (let u = 0; u < w; u++) {
         put(u, -2, v, style.base, OP_FILL_DOWN); // foundation down to the ground
         put(u, -1, v, style.base);
-        for (let y = 0; y < 9; y++) put(u, y, v, B.AIR);   // clear trees and hills
+        for (let y = 0; y < 14; y++) put(u, y, v, B.AIR);  // clear trees and hills
       }
-      draw(put, w, d);
+      draw(put, w, d, face);
     };
-    const walls = (put, w, d, h, wall, frame) => {
+    const st = (base, state = {}) => stateId(base, state);
+    const walls = (put, w, d, h, wall, frame, base = null) => {
       for (let y = 0; y < h; y++) for (let v = 0; v < d; v++) for (let u = 0; u < w; u++) {
         const edgeU = u === 0 || u === w - 1, edgeV = v === 0 || v === d - 1;
         if (!edgeU && !edgeV) continue;
-        put(u, y, v, edgeU && edgeV ? frame : wall);
+        put(u, y, v, edgeU && edgeV ? frame : (y === 0 && base ? base : wall));
       }
     };
-    const roof = (put, w, d, y0, mat) => {
-      for (let k = 0; k * 2 < Math.min(w, d); k++) {
-        for (let v = k; v < d - k; v++) for (let u = k; u < w - k; u++) put(u, y0 + k, v, mat);
-        if (k >= 1) break;
+    const floor = (put, w, d, id) => { for (let v = 1; v < d - 1; v++) for (let u = 1; u < w - 1; u++) put(u, -1, v, id); };
+    // A pitched roof of stairs sloping down to the front and back, with a
+    // one-block overhang and the triangular gable ends filled in.
+    const gableRoof = (put, face, w, d, y0, fill) => {
+      for (let k = 0; ; k++) {
+        const vf = k - 1, vb = d - k;
+        if (vf > vb) break;
+        for (let u = -1; u <= w; u++) {
+          if (vf === vb) put(u, y0 + k, vf, st(style.slab, { half: 'bottom' }));
+          else {
+            put(u, y0 + k, vf, st(style.stairs, { half: 'bottom', facing: face(0, 1) }));
+            put(u, y0 + k, vb, st(style.stairs, { half: 'bottom', facing: face(0, -1) }));
+          }
+        }
+        for (let v = vf + 1; v < vb; v++) { put(0, y0 + k, v, fill); put(w - 1, y0 + k, v, fill); }
       }
     };
-    const door = (put, u) => { put(u, 0, 0, B.AIR); put(u, 1, 0, B.AIR); };
+    const door = (put, face, u) => {
+      put(u, 0, 0, st(style.door, { half: 'lower', open: false, facing: face(0, 1) }));
+      put(u, 1, 0, st(style.door, { half: 'upper', open: false, facing: face(0, 1) }));
+      put(u, 0, -1, B.AIR); put(u, 1, -1, B.AIR);
+    };
+    // A torch on a wall: (u, y, v) is the air cell, (du, dv) points away from the wall.
+    const wallTorch = (put, face, u, y, v, du, dv) => put(u, y, v, st('wall_torch', { facing: face(du, dv) }));
+    const bed = (put, face, u, v, color = 'red') => {
+      put(u, 0, v, st(`${color}_bed`, { part: 'foot', facing: face(0, 1) }));
+      put(u, 0, v + 1, st(`${color}_bed`, { part: 'head', facing: face(0, 1) }));
+    };
+    const BED_COLORS = ['red', 'white', 'light_blue', 'yellow', 'green', 'orange'];
+    const CROPS = [['wheat_crop', 7], ['carrots', 3], ['potatoes', 3], ['beetroots', 3]];
 
     const TYPES = {
-      house(put, w, d) {
-        walls(put, w, d, 3, style.wall, style.frame);
-        roof(put, w, d, 3, style.roof);
-        door(put, Math.floor(w / 2));
-        put(0, 1, Math.floor(d / 2), B.GLASS); put(w - 1, 1, Math.floor(d / 2), B.GLASS); put(Math.floor(w / 2), 1, d - 1, B.GLASS);
-        put(1, 0, d - 2, B.CRAFTING_TABLE); put(w - 2, 0, d - 2, B.TORCH);
+      house(put, w, d, face) {
+        walls(put, w, d, 3, style.wall, style.frame, B.COBBLESTONE);
+        floor(put, w, d, style.wall);
+        gableRoof(put, face, w, d, 3, style.wall);
+        door(put, face, 2);
+        put(0, 1, 2, B.GLASS_PANE); put(0, 1, 3, B.GLASS_PANE); put(w - 1, 1, 2, B.GLASS_PANE); put(w - 1, 1, 3, B.GLASS_PANE);
+        put(2, 1, d - 1, B.GLASS_PANE);
+        bed(put, face, 1, d - 3, BED_COLORS[Math.floor(r() * BED_COLORS.length)]);
+        put(3, 0, d - 2, B.CRAFTING_TABLE);
+        wallTorch(put, face, 3, 2, d - 2, 0, -1);
+        wallTorch(put, face, 1, 2, -1, 0, -1);
       },
-      bighouse(put, w, d) {
-        walls(put, w, d, 4, style.wall, style.frame);
-        roof(put, w, d, 4, style.roof);
-        door(put, Math.floor(w / 2));
-        for (const v of [2, d - 3]) { put(0, 1, v, B.GLASS); put(0, 2, v, B.GLASS); put(w - 1, 1, v, B.GLASS); put(w - 1, 2, v, B.GLASS); }
-        put(1, 0, d - 2, B.BOOKSHELF); put(2, 0, d - 2, B.BOOKSHELF); put(w - 2, 0, d - 2, B.FURNACE); put(w - 2, 0, 1, B.TORCH); put(1, 0, 1, B.TORCH);
+      bighouse(put, w, d, face) {
+        walls(put, w, d, 4, style.wall, style.frame, B.COBBLESTONE);
+        floor(put, w, d, style.wall);
+        gableRoof(put, face, w, d, 4, style.wall);
+        door(put, face, 3);
+        for (const v of [2, 3, d - 4, d - 3]) { put(0, 1, v, B.GLASS_PANE); put(0, 2, v, B.GLASS_PANE); put(w - 1, 1, v, B.GLASS_PANE); put(w - 1, 2, v, B.GLASS_PANE); }
+        put(1, 1, 0, B.GLASS_PANE); put(5, 1, 0, B.GLASS_PANE);
+        bed(put, face, 1, d - 3, BED_COLORS[Math.floor(r() * BED_COLORS.length)]);
+        bed(put, face, 2, d - 3, BED_COLORS[Math.floor(r() * BED_COLORS.length)]);
+        put(5, 0, d - 2, B.LOOT_CHEST); put(4, 0, d - 2, B.FURNACE); put(5, 0, d - 3, B.CRAFTING_TABLE);
+        for (let u = 2; u <= 4; u++) for (let v = 2; v <= 3; v++) put(u, 0, v, B.RED_CARPET);
+        wallTorch(put, face, 3, 2, d - 2, 0, -1); wallTorch(put, face, 1, 2, 1, 0, 1); wallTorch(put, face, 5, 2, 1, 0, 1);
+        wallTorch(put, face, 2, 2, -1, 0, -1); wallTorch(put, face, 4, 2, -1, 0, -1);
       },
-      smithy(put, w, d) {
-        walls(put, w, d, 4, B.COBBLESTONE, style.frame);
-        for (let u = 1; u < w - 1; u++) { put(u, 0, 0, B.AIR); put(u, 1, 0, B.AIR); put(u, 2, 0, B.AIR); }
-        roof(put, w, d, 4, style.roof);
-        put(1, 0, d - 2, B.FURNACE); put(2, 0, d - 2, B.FURNACE); put(w - 2, 0, d - 2, B.CRAFTING_TABLE); put(w - 2, 0, 1, B.TORCH);
+      library(put, w, d, face) {
+        walls(put, w, d, 4, style.wall, style.frame, B.COBBLESTONE);
+        floor(put, w, d, B.COBBLESTONE);
+        gableRoof(put, face, w, d, 4, style.wall);
+        door(put, face, 3);
+        // shelves along the side walls, windows above them
+        for (let v = 2; v < d - 1; v++) { put(1, 0, v, B.BOOKSHELF); put(w - 2, 0, v, B.BOOKSHELF); put(0, 2, v, B.GLASS_PANE); put(w - 1, 2, v, B.GLASS_PANE); }
+        for (let u = 1; u < w - 1; u++) put(u, 0, d - 2, B.BOOKSHELF);
+        put(3, 0, d - 3, B.CRAFTING_TABLE); put(2, 0, d - 3, st('oak_stairs', { half: 'bottom', facing: face(1, 0) }));
+        wallTorch(put, face, 3, 2, d - 3, 0, -1); wallTorch(put, face, 2, 2, -1, 0, -1); wallTorch(put, face, 4, 2, -1, 0, -1);
       },
-      church(put, w, d) {
-        walls(put, w, d, 5, B.COBBLESTONE, B.COBBLESTONE);
-        roof(put, w, d, 5, B.COBBLESTONE);
-        // bell tower over the back three rows
-        for (let y = 5; y < 10; y++) for (let v = d - 3; v < d; v++) for (let u = 0; u < w; u++) {
-          if (u === 0 || u === w - 1 || v === d - 3 || v === d - 1) put(u, y, v, y === 8 && u === Math.floor(w / 2) ? B.GLASS : B.COBBLESTONE);
+      smithy(put, w, d, face) {
+        // a stone workshop at the back, a covered porch with a lava forge at the front
+        for (let y = 0; y < 4; y++) for (let v = 3; v < d; v++) for (let u = 0; u < w; u++) {
+          if (u === 0 || u === w - 1 || v === d - 1 || (v === 3 && u >= 3)) put(u, y, v, B.COBBLESTONE);
         }
-        for (let v = d - 3; v < d; v++) for (let u = 0; u < w; u++) put(u, 10, v, B.COBBLESTONE);
-        door(put, Math.floor(w / 2));
-        put(0, 2, 2, B.GLASS); put(w - 1, 2, 2, B.GLASS); put(0, 2, d - 3, B.GLASS); put(w - 1, 2, d - 3, B.GLASS);
-        put(1, 0, d - 2, B.TORCH); put(w - 2, 0, d - 2, B.TORCH);
+        floor(put, w, d, B.COBBLESTONE);
+        for (let u = 0; u < w; u++) put(u, -1, 0, B.COBBLESTONE);
+        for (const u of [0, w - 1]) for (let y = 0; y < 4; y++) put(u, y, 0, style.frame);
+        for (let u = 1; u < w - 1; u++) put(u, 0, 0, style.fence);
+        put(3, 0, 0, B.AIR);
+        for (let v = -1; v <= d; v++) for (let u = -1; u <= w; u++) put(u, 4, v, st('stone_slab', { half: 'bottom' }));
+        put(1, -1, 1, B.LAVA); put(1, -1, 2, B.LAVA); put(1, 0, 1, B.IRON_BARS); put(1, 0, 2, B.IRON_BARS);
+        put(w - 2, 0, 1, B.FURNACE); put(w - 2, 0, 2, B.FURNACE); put(w - 3, 0, 1, st('anvil', { facing: 'north' }));
+        put(1, 0, d - 2, B.LOOT_CHEST); put(w - 2, 0, d - 2, B.CRAFTING_TABLE); put(2, 0, 4, B.AIR); put(2, 1, 4, B.AIR); put(2, 0, 3, B.AIR); put(2, 1, 3, B.AIR);
+        wallTorch(put, face, 2, 2, d - 2, 0, -1);
+      },
+      church(put, w, d, face) {
+        walls(put, w, d, 6, B.COBBLESTONE, B.STONE_BRICKS);
+        floor(put, w, d, B.COBBLESTONE);
+        door(put, face, 2);
+        for (const v of [2, 4]) { put(0, 2, v, B.GLASS_PANE); put(0, 3, v, B.GLASS_PANE); put(w - 1, 2, v, B.GLASS_PANE); put(w - 1, 3, v, B.GLASS_PANE); }
+        for (let v = -1; v <= d - 4; v++) for (let u = -1; u <= w; u++) put(u, 6, v, st('cobblestone_slab', { half: 'bottom' }));
+        // the bell tower over the back three rows, with a ladder up inside
+        for (let y = 6; y < 13; y++) for (let v = d - 3; v < d; v++) for (let u = 0; u < w; u++) {
+          const edge = u === 0 || u === w - 1 || v === d - 3 || v === d - 1;
+          if (edge) put(u, y, v, (y === 10 || y === 11) && (u === 2 || v === d - 2) ? B.AIR : B.COBBLESTONE);
+          else if (y > 6) put(u, y, v, B.AIR);
+        }
+        for (let v = d - 4; v <= d; v++) for (let u = -1; u <= w; u++) put(u, 13, v, st('stone_brick_slab', { half: 'bottom' }));
+        for (let y = 0; y < 12; y++) put(2, y, d - 2, st('ladder', { facing: face(0, -1) }));
+        for (let u = 1; u < w - 1; u++) put(u, 6, d - 2, B.AIR);
+        put(1, 0, 3, st(style.stairs, { half: 'bottom', facing: face(0, 1) })); put(3, 0, 3, st(style.stairs, { half: 'bottom', facing: face(0, 1) }));
+        wallTorch(put, face, 1, 3, d - 4, 0, -1); wallTorch(put, face, 3, 3, d - 4, 0, -1);
+        wallTorch(put, face, 1, 2, -1, 0, -1); wallTorch(put, face, 3, 2, -1, 0, -1);
       },
       farm(put, w, d) {
+        // two crop beds either side of a water channel, framed with logs
+        const crops = [CROPS[Math.floor(r() * CROPS.length)], CROPS[Math.floor(r() * CROPS.length)]];
         for (let v = 0; v < d; v++) for (let u = 0; u < w; u++) {
           const edge = u === 0 || u === w - 1 || v === 0 || v === d - 1;
           const water = u === Math.floor(w / 2) && !edge;
-          put(u, -1, v, edge ? style.frame : water ? B.WATER : B.FARMLAND);
-          if (!edge && !water) put(u, 0, v, B.WHEAT);
+          put(u, -1, v, edge ? st(style.log, { axis: 'y' }) : water ? B.WATER : B.FARMLAND);
+          if (!edge && !water) {
+            const [base, max] = crops[u < w / 2 ? 0 : 1];
+            put(u, 0, v, st(base, { age: Math.max(1, max - Math.floor(r() * 3)) }));
+          }
         }
       },
-      lamp(put) {
-        put(0, 0, 0, style.frame); put(0, 1, 0, style.frame); put(0, 2, 0, style.frame); put(0, 3, 0, B.TORCH);
+      pen(put, w, d, face) {
+        for (let v = 0; v < d; v++) for (let u = 0; u < w; u++) {
+          put(u, -1, v, B.GRASS);
+          if (u === 0 || u === w - 1 || v === 0 || v === d - 1) put(u, 0, v, style.fence);
+        }
+        put(3, 0, 0, st(style.gate, { open: false, facing: face(0, 1) }));
+        put(1, 0, d - 2, B.HAY_BALE); put(2, 0, d - 2, B.HAY_BALE); put(1, 1, d - 2, B.HAY_BALE);
+      },
+      lamp(put, w, d, face) {
+        put(0, 0, 0, style.fence); put(0, 1, 0, style.fence); put(0, 2, 0, style.fence); put(0, 3, 0, B.BLACK_WOOL);
+        for (const [du, dv] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) wallTorch(put, face, du, 3, dv, du, dv);
       },
     };
-    const SIZES = { house: [5, 5], bighouse: [7, 7], smithy: [7, 6], church: [5, 9], farm: [7, 9], lamp: [1, 1] };
-    const PICKS = ['house', 'house', 'house', 'bighouse', 'bighouse', 'farm', 'farm', 'smithy', 'lamp', 'church'];
+    const SIZES = { house: [5, 6], bighouse: [7, 9], library: [7, 9], smithy: [7, 7], church: [5, 9], farm: [7, 9], pen: [7, 7], lamp: [1, 1] };
+    const PICKS = ['house', 'house', 'house', 'bighouse', 'bighouse', 'library', 'farm', 'farm', 'farm', 'smithy', 'lamp', 'lamp', 'pen', 'church'];
 
     // Roads: four arms from the centre.
     const arms = [[1, 0], [-1, 0], [0, 1], [0, -1]];
@@ -634,8 +737,8 @@ export function createGenerator(seedInput) {
       op(x, wy - 4, z, B.COBBLESTONE, OP_FILL_DOWN);
       for (let y = -3; y < 0; y++) op(x, wy + y, z, inner ? B.WATER : B.COBBLESTONE);
       op(x, wy, z, inner ? B.AIR : B.COBBLESTONE);
-      for (let y = 1; y < 4; y++) op(x, wy + y, z, (Math.abs(dx - 0.5) === 1.5 && Math.abs(dz - 0.5) === 1.5) ? style.frame : B.AIR);
-      op(x, wy + 4, z, B.COBBLESTONE);
+      for (let y = 1; y < 3; y++) op(x, wy + y, z, (Math.abs(dx - 0.5) === 1.5 && Math.abs(dz - 0.5) === 1.5) ? style.fence : B.AIR);
+      op(x, wy + 3, z, stateId('cobblestone_slab', { half: 'bottom' }));
     }
     const typed = new Int32Array(ops);
     const pad = 14;

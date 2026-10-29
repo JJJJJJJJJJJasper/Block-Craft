@@ -13,6 +13,7 @@
 import * as THREE from 'three';
 import { Sky } from './sky.js';
 import { tintPalette } from '../../shared/biomes.js';
+import { B } from '../../shared/blocks.js';
 
 const TINTS = tintPalette();
 
@@ -27,8 +28,23 @@ const CHUNK_VERT = /* glsl */`
   varying float vBlock;
   varying float vShade;
   varying float vDist;
+  varying vec3 vWorld;
+  varying float vWater;
+  uniform float time;
+  uniform float waterLayer;
   void main() {
     vUv = uv;
+    vec4 world = modelMatrix * vec4(position, 1.0);
+    float faceId = floor(aData.w / 4.0 + 0.01);
+    // Plants and crops (face code 6) sway at the top; leaves (foliage tint) rustle a little.
+    float wave = sin(time * 1.7 + world.x * 0.6 + world.z * 0.45) + 0.5 * sin(time * 2.9 + world.z * 0.9);
+    if (faceId > 5.5 && uv.y > 0.5) world.xz += vec2(0.05, 0.035) * wave;
+    float tintI = floor(aTint + 0.5);
+    if (tintI > 0.5 && mod(tintI, 2.0) < 0.5 && faceId < 5.5) world.xyz += vec3(0.02, 0.012, 0.02) * wave;
+    // Water: gentle swells on the surface.
+    vWater = abs(aData.x - waterLayer) < 0.5 ? 1.0 : 0.0;
+    if (vWater > 0.5 && faceId > 1.5 && faceId < 2.5) world.y += 0.04 * (sin(time * 1.3 + world.x * 0.8) + sin(time * 1.1 + world.z * 0.7)) - 0.04;
+    vWorld = world.xyz;
     vTint = tints[int(aTint + 0.5)];
     vLayer = aData.x;
     vSky = aData.y / 15.0;
@@ -39,7 +55,7 @@ const CHUNK_VERT = /* glsl */`
     // top brightest, bottom darkest, sides in between.
     float faceShade = face < 1.5 ? 0.8 : face < 2.5 ? 1.0 : face < 3.5 ? 0.55 : face < 5.5 ? 0.68 : 0.9;
     vShade = faceShade * (0.5 + ao * (0.5 / 3.0));
-    vec4 mv = modelViewMatrix * vec4(position, 1.0);
+    vec4 mv = viewMatrix * world;
     vDist = length(mv.xyz);
     gl_Position = projectionMatrix * mv;
   }
@@ -54,6 +70,12 @@ const CHUNK_FRAG = /* glsl */`
   uniform float fogFar;
   uniform float opacity;
   uniform float cutout;
+  uniform vec3 sunTint;     // colour of sunlight now (white at noon, gold at sunset, blue at night)
+  uniform vec3 skyReflect;  // what water reflects
+  uniform vec3 sunDir;
+  uniform float time;
+  varying vec3 vWorld;
+  varying float vWater;
   varying vec3 vTint;
   varying vec2 vUv;
   varying float vLayer;
@@ -71,14 +93,28 @@ const CHUNK_FRAG = /* glsl */`
     float light = max(sky, vBlock);
     // Light levels feel linear to the eye when brightness falls off
     // exponentially (~20% per level), plus a little ambient so caves aren't pitch black.
-    float bright = 0.035 + 0.965 * pow(0.8, (1.0 - light) * 15.0);
+    float bright = 0.07 + 0.93 * pow(0.8, (1.0 - light) * 15.0);
     // Torch light is warm; sunlight is white.
-    vec3 tint = mix(vec3(1.0), vec3(1.0, 0.88, 0.72), clamp((vBlock - sky) * 2.0, 0.0, 1.0));
+    vec3 tint = mix(sunTint, vec3(1.0, 0.88, 0.72), clamp((vBlock - sky) * 2.0, 0.0, 1.0));
     vec3 color = tex.rgb * bright * tint * vShade;
+    float alpha = cutout > 0.5 ? opacity : opacity * max(tex.a, 0.35);
+    if (vWater > 0.5) {
+      // Water reflects the sky more at grazing angles (Fresnel), with a moving
+      // ripple pattern and a bright glint where the sun reflects.
+      vec3 view = normalize(vWorld - cameraPosition);
+      float ripple = sin(vWorld.x * 2.1 + time * 1.6) * sin(vWorld.z * 1.7 - time * 1.3) * 0.08;
+      vec3 n = normalize(vec3(ripple, 1.0, ripple * 0.7));
+      float fres = 0.15 + 0.75 * pow(1.0 - abs(dot(view, n)), 3.0);
+      color = mix(color, skyReflect * (0.35 + 0.65 * vSky), fres * smoothstep(0.3, 0.8, vSky));
+      vec3 refl = reflect(view, n);
+      float glint = pow(max(dot(refl, sunDir), 0.0), 220.0) * vSky * daylight;
+      color += sunTint * glint * 1.4;
+      alpha = mix(alpha, 0.92, fres * 0.6) + glint;
+    }
     float fog = smoothstep(fogNear, fogFar, vDist);
     color = mix(color, fogColor, fog);
     // translucent blocks (water, stained glass) also use the texture's own alpha
-    gl_FragColor = vec4(color, cutout > 0.5 ? opacity : opacity * max(tex.a, 0.35));
+    gl_FragColor = vec4(color, min(alpha, 1.0));
   }
 `;
 
@@ -130,6 +166,11 @@ export class Renderer {
       opacity: { value: 1 },
       cutout: { value: 1 },
       tints: { value: TINTS.map(([r, g, b]) => new THREE.Vector3(r, g, b)) },
+      time: { value: 0 },
+      waterLayer: { value: textures.faceLayers[B.WATER * 6 + 2] },
+      sunTint: { value: new THREE.Color(1, 1, 1) },
+      skyReflect: { value: new THREE.Color(0.6, 0.75, 0.95) },
+      sunDir: { value: new THREE.Vector3(0, 1, 0) },
     });
     this.opaqueMaterial = new THREE.ShaderMaterial({ vertexShader: CHUNK_VERT, fragmentShader: CHUNK_FRAG, uniforms: uniforms() });
     this.transMaterial = new THREE.ShaderMaterial({
@@ -140,6 +181,8 @@ export class Renderer {
     this.transMaterial.uniforms.cutout.value = 0;
 
     this.sky = new Sky(this.scene, this.camera);
+    this.fancy = true;
+    this._createPost();
     this._createHighlight(textures);
 
     window.addEventListener('resize', () => this.resize());
@@ -171,7 +214,17 @@ export class Renderer {
     const underwater = !!submerged;
     if (submerged === 'water') { fogColor = new THREE.Color(0x1d3f7a).multiplyScalar(0.4 + env.daylight * 0.6); near = 1; far = 22; }
     if (submerged === 'lava') { fogColor = new THREE.Color(0xc84a10); near = 0.2; far = 2.5; }
+    // Sunlight colour: golden low in the sky, cool and dim at night.
+    const sunY = this.sky.uniforms.sunDir.value.y;
+    const gold = Math.max(0, 1 - Math.abs(sunY - 0.08) * 4);
+    const night = 1 - THREE.MathUtils.smoothstep(sunY, -0.2, 0.05);
+    this.sunTint.setRGB(1, 1, 1).lerp(new THREE.Color(1.0, 0.78, 0.55), gold * 0.7).lerp(new THREE.Color(0.7, 0.8, 1.0), night * 0.8);
+    const t = performance.now() / 1000;
     for (const m of [this.opaqueMaterial, this.transMaterial]) {
+      m.uniforms.time.value = t;
+      m.uniforms.sunTint.value.copy(this.sunTint);
+      m.uniforms.skyReflect.value.copy(this.sky.uniforms.horizon.value).lerp(this.sky.uniforms.zenith.value, 0.35);
+      m.uniforms.sunDir.value.copy(sunY > -0.1 ? this.sky.uniforms.sunDir.value : this.sky.uniforms.moonDir.value);
       m.uniforms.daylight.value = env.daylight;
       m.uniforms.fogColor.value.copy(fogColor);
       m.uniforms.fogNear.value = near;
@@ -186,6 +239,7 @@ export class Renderer {
     this.ambient.intensity = Math.PI * (0.25 + env.daylight * 0.5);
     this.sun.intensity = Math.PI * (0.1 + env.daylight * 0.35);
     this.daylight = env.daylight;
+    this.underwater = underwater;
   }
 
   // ---- Block selection outline and crack overlay ----------------------------
@@ -249,7 +303,87 @@ export class Renderer {
     mesh.geometry.dispose();
   }
 
+  // ---- "Fancy graphics": a full-screen pass over the finished picture ----------------
+  // The world is drawn into a texture first, then one shader adds:
+  //   - light shafts ("god rays"): from each pixel we step toward the sun on screen
+  //     and count how much open sky we pass; trees and mountains block it, so
+  //     beams of light stream out between them,
+  //   - colour grading: a touch more contrast and colour, warmer at golden hour,
+  //   - a soft vignette darkening the corners.
+  _createPost() {
+    this.sunTint = new THREE.Color(1, 1, 1);
+    this.rt = new THREE.WebGLRenderTarget(1, 1, { depthBuffer: true });
+    this.rt.depthTexture = new THREE.DepthTexture(1, 1);
+    this.postUniforms = {
+      tColor: { value: this.rt.texture }, tDepth: { value: this.rt.depthTexture },
+      sunPos: { value: new THREE.Vector2(0.5, 0.5) }, rayStrength: { value: 0 }, rayColor: { value: new THREE.Color(1, 0.9, 0.7) },
+      warmth: { value: 0 }, aspect: { value: 1 },
+    };
+    this.postScene = new THREE.Scene();
+    this.postCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    this.postScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), new THREE.ShaderMaterial({
+      uniforms: this.postUniforms, depthTest: false, depthWrite: false,
+      vertexShader: 'varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }',
+      fragmentShader: /* glsl */`
+        uniform sampler2D tColor;
+        uniform sampler2D tDepth;
+        uniform vec2 sunPos;
+        uniform float rayStrength;
+        uniform vec3 rayColor;
+        uniform float warmth;
+        uniform float aspect;
+        varying vec2 vUv;
+        void main() {
+          vec3 col = texture2D(tColor, vUv).rgb;
+          if (rayStrength > 0.001) {
+            vec2 delta = (sunPos - vUv) / 22.0;
+            vec2 p = vUv;
+            float sum = 0.0, w = 1.0;
+            for (int i = 0; i < 22; i++) {
+              p += delta;
+              float sky = step(0.99999, texture2D(tDepth, p).r);
+              sum += sky * w;
+              w *= 0.95;
+            }
+            vec2 d = (vUv - sunPos) * vec2(aspect, 1.0);
+            float falloff = 1.0 / (1.0 + dot(d, d) * 9.0);
+            col += rayColor * (sum / 14.0) * falloff * rayStrength;
+          }
+          // grading: contrast + saturation, warmer at golden hour
+          float lum = dot(col, vec3(0.299, 0.587, 0.114));
+          col = mix(vec3(lum), col, 1.12);
+          col = (col - 0.5) * 1.06 + 0.5;
+          col *= mix(vec3(1.0), vec3(1.06, 1.0, 0.9), warmth);
+          vec2 c = vUv - 0.5;
+          col *= 1.0 - dot(c, c) * 0.55;
+          gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
+        }`,
+    })));
+  }
+
+  setFancy(on) { this.fancy = on; }
+
   render() {
-    this.renderer.render(this.scene, this.camera);
+    const r = this.renderer;
+    if (!this.fancy) { r.setRenderTarget(null); r.render(this.scene, this.camera); return; }
+    const size = r.getDrawingBufferSize(new THREE.Vector2());
+    if (this.rt.width !== size.x || this.rt.height !== size.y) this.rt.setSize(size.x, size.y);
+    r.setRenderTarget(this.rt);
+    r.render(this.scene, this.camera);
+    r.setRenderTarget(null);
+    // Where is the sun (or moon) on screen, and how bright should its beams be?
+    const U = this.postUniforms, sky = this.sky.uniforms;
+    const sunUp = sky.sunDir.value.y > -0.05;
+    const dir = sunUp ? sky.sunDir.value : sky.moonDir.value;
+    const fwd = new THREE.Vector3(); this.camera.getWorldDirection(fwd);
+    const facing = THREE.MathUtils.smoothstep(fwd.dot(dir), 0.1, 0.6);
+    const p = dir.clone().multiplyScalar(500).add(this.camera.position).project(this.camera);
+    U.sunPos.value.set(p.x * 0.5 + 0.5, p.y * 0.5 + 0.5);
+    const height = THREE.MathUtils.smoothstep(dir.y, -0.05, 0.12);
+    U.rayStrength.value = this.underwater ? 0 : facing * height * (sunUp ? 0.55 : 0.12);
+    U.rayColor.value.copy(sunUp ? this.sunTint : new THREE.Color(0.6, 0.7, 1.0));
+    U.warmth.value = sunUp ? Math.max(0, 1 - Math.abs(sky.sunDir.value.y - 0.08) * 4) : 0;
+    U.aspect.value = size.x / size.y;
+    r.render(this.postScene, this.postCam);
   }
 }

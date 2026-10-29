@@ -13,6 +13,7 @@ const DEFAULTS = {
   volume: 0.7,
   showFps: false,
   hidpi: false,
+  fancy: true,
 };
 
 export function loadSettings() {
@@ -52,4 +53,5 @@ export function bindSettingsUI(settings, apply) {
   bind('vol-input', 'volume', v => Math.round(v * 100) + '%');
   bind('fps-input', 'showFps', () => '');
   bind('hidpi-input', 'hidpi', () => '');
+  bind('fancy-input', 'fancy', () => '');
 }

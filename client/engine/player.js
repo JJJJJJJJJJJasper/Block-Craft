@@ -75,6 +75,7 @@ export class Player {
     this.inWater = liquidLevel(this.pos, P.playerHeight, getBlock);
     const fx0 = Math.floor(this.pos.x), fz0 = Math.floor(this.pos.z);
     this.inLava = getBlock(fx0, Math.floor(this.pos.y + 0.1), fz0) === B.LAVA || getBlock(fx0, Math.floor(this.pos.y + 1), fz0) === B.LAVA;
+    this.inFire = getBlock(fx0, Math.floor(this.pos.y + 0.1), fz0) === B.FIRE;
     this.headInWater = IS_LIQUID[getBlock(Math.floor(this.pos.x), Math.floor(this.pos.y + P.eyeHeight), Math.floor(this.pos.z))] === 1;
 
     if (this.flying) {
@@ -99,7 +100,9 @@ export class Player {
     } else {
       const speed = this.sneaking ? P.walkSpeed * 0.3 : this.sprinting ? P.sprintSpeed : P.walkSpeed;
       // Strong control on the ground, weaker in the air (like real momentum).
-      const k = 1 - Math.exp(-dt * (this.onGround ? 14 : 3));
+      // (just after being hit, knockback carries you: very little control)
+      if (this.knockTimer > 0) this.knockTimer -= dt;
+      const k = 1 - Math.exp(-dt * (this.knockTimer > 0 ? 1 : this.onGround ? 14 : 3));
       this.vel.x += (wishX * speed - this.vel.x) * k;
       this.vel.z += (wishZ * speed - this.vel.z) * k;
       this.vel.y -= P.gravity * dt;
@@ -159,6 +162,9 @@ export class Player {
       if (this.inLava) {
         this.lavaTimer -= dt;
         if (this.lavaTimer <= 0) { this.lavaTimer = 0.5; events.onDamage(4, 'lava'); }
+      } else if (this.inFire) {
+        this.lavaTimer -= dt;
+        if (this.lavaTimer <= 0) { this.lavaTimer = 0.6; events.onDamage(1, 'burned'); }
       } else this.lavaTimer = 0;
     }
     if (this.hurtTime > 0) this.hurtTime -= dt;

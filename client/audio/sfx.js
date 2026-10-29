@@ -115,10 +115,12 @@ export class Sfx {
     this._noise(type, freq, q, dur, 0.12);
   }
 
-  hurt() {
+  hurt(dist) {
     if (!this.ready) return;
-    this._tone('square', 330, 180, 0.18, 0.12);
-    this._tone('sawtooth', 260, 140, 0.2, 0.08, 0.02);
+    const v = dist === undefined ? 1 : this._dist(dist);
+    if (v <= 0) return;
+    this._tone('square', 330, 180, 0.18, 0.12 * v);
+    this._tone('sawtooth', 260, 140, 0.2, 0.08 * v, 0.02);
   }
 
   pickup() {
@@ -130,6 +132,11 @@ export class Sfx {
     if (!this.ready) return;
     for (let i = 0; i < 3; i++) this._noise('bandpass', 1200, 1.5, 0.08, 0.25, i * 0.12);
   }
+
+  /** Skeleton bones clacking, a spider's hiss, a Rumbler's low grind. */
+  rattle(dist) { const v = this._dist(dist); if (this.ready && v > 0) for (let i = 0; i < 3; i++) this._noise('bandpass', 2600, 6, 0.04, 0.2 * v, i * 0.07); }
+  hiss(dist) { const v = this._dist(dist); if (this.ready && v > 0) this._noise('highpass', 4000, 0.8, 0.35, 0.15 * v); }
+  rumble(dist) { const v = this._dist(dist); if (this.ready && v > 0) { this._tone('sawtooth', 70, 50, 0.5, 0.08 * v); this._noise('lowpass', 300, 1, 0.5, 0.25 * v); } }
 
   /** A hissing fuse (lit TNT). */
   fuse(dist) {
