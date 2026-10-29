@@ -14,6 +14,7 @@ import * as THREE from 'three';
 import { Sky } from './sky.js';
 import { tintPalette } from '../../shared/biomes.js';
 import { B } from '../../shared/blocks.js';
+import { SEA_LEVEL } from '../../shared/config.js';
 
 const TINTS = tintPalette();
 
@@ -74,6 +75,9 @@ const CHUNK_FRAG = /* glsl */`
   uniform vec3 skyReflect;  // what water reflects
   uniform vec3 sunDir;
   uniform float time;
+  uniform vec3 mistColor;
+  uniform float mistAmount;
+  uniform float seaLevel;
   varying vec3 vWorld;
   varying float vWater;
   varying vec3 vTint;
@@ -111,8 +115,13 @@ const CHUNK_FRAG = /* glsl */`
       color += sunTint * glint * 1.4;
       alpha = mix(alpha, 0.92, fres * 0.6) + glint;
     }
-    float fog = smoothstep(fogNear, fogFar, vDist);
+    // Distance haze: things far away fade softly into the blue air (instead of a
+    // fog wall at the edge of the render distance), and white mist lies in the
+    // low valleys. fogNear/fogFar only matter underwater.
+    float fog = max(smoothstep(fogNear, fogFar, vDist), (1.0 - exp(-vDist * 0.0016)) * 0.85);
     color = mix(color, fogColor, fog);
+    float mist = exp(-max(vWorld.y - seaLevel - 6.0, 0.0) / 22.0) * smoothstep(140.0, 500.0, vDist);
+    color = mix(color, mistColor, mist * mistAmount);
     // translucent blocks (water, stained glass) also use the texture's own alpha
     gl_FragColor = vec4(color, min(alpha, 1.0));
   }
@@ -135,7 +144,7 @@ export class Renderer {
     container.appendChild(this.renderer.domElement);
 
     this.scene = new THREE.Scene();
-    this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.08, 1200);
+    this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.08, 1500);
     this.camera.rotation.order = 'YXZ';
     this.scene.add(this.camera);
     this.scene.fog = new THREE.Fog(0x9ec4ff, 50, 100);
@@ -171,6 +180,9 @@ export class Renderer {
       sunTint: { value: new THREE.Color(1, 1, 1) },
       skyReflect: { value: new THREE.Color(0.6, 0.75, 0.95) },
       sunDir: { value: new THREE.Vector3(0, 1, 0) },
+      mistColor: { value: new THREE.Color(0.9, 0.92, 0.95) },
+      mistAmount: { value: 0.75 },
+      seaLevel: { value: SEA_LEVEL },
     });
     this.opaqueMaterial = new THREE.ShaderMaterial({ vertexShader: CHUNK_VERT, fragmentShader: CHUNK_FRAG, uniforms: uniforms() });
     this.transMaterial = new THREE.ShaderMaterial({
@@ -197,9 +209,11 @@ export class Renderer {
   setFov(fov) { this.camera.fov = fov; this.camera.updateProjectionMatrix(); }
 
   setRenderDistance(chunks) {
-    const far = chunks * 16;
-    this.fogFar = Math.max(24, far - 4);
-    this.fogNear = this.fogFar * 0.7;
+    // No fog wall any more: distant chunks fade with the haze and the far
+    // terrain carries on behind them. (Underwater fog is set separately.)
+    this.renderDistance = chunks;
+    this.fogNear = 4000;
+    this.fogFar = 5000;
   }
 
   /**
@@ -240,6 +254,14 @@ export class Renderer {
     this.sun.intensity = Math.PI * (0.1 + env.daylight * 0.35);
     this.daylight = env.daylight;
     this.underwater = underwater;
+    // Mist is white by day, golden at sunrise/sunset, a dim blue at night.
+    const mist = this.mistColor || (this.mistColor = new THREE.Color());
+    mist.copy(env.fogColor).lerp(new THREE.Color(1, 1, 1), 0.45).lerp(new THREE.Color(1.0, 0.82, 0.6), gold * 0.45);
+    for (const m of [this.opaqueMaterial, this.transMaterial]) {
+      m.uniforms.mistColor.value.copy(mist);
+      m.uniforms.mistAmount.value = underwater ? 0 : 0.55;
+    }
+    this.farEnv = { daylight: env.daylight, sunDir: this.opaqueMaterial.uniforms.sunDir.value, sunTint: this.sunTint, haze: fogColor, mist };
   }
 
   // ---- Block selection outline and crack overlay ----------------------------

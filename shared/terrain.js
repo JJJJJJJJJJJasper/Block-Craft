@@ -155,7 +155,7 @@ export function createGenerator(seedInput) {
     else if (height <= S + 2 && land < 0.9 && swampW < 0.5) biome = frozen ? BIOME.SNOWY_BEACH : hilly > 0.4 ? BIOME.STONE_BEACH : BIOME.BEACH;
     else if (rangeW > 0.35 && alt > 34) {
       // up a mountain: forests low down, bare rock higher, snow on top (lower when cold)
-      const snowLine = 104 - T * 40;
+      const snowLine = 86 - T * 35;
       if (alt > snowLine) biome = BIOME.SNOWY_PEAKS;
       else if (alt > snowLine - 26) biome = BIOME.STONY_PEAKS;
       else biome = H > -0.05 ? BIOME.WOODED_MOUNTAINS : BIOME.MOUNTAINS;
@@ -813,7 +813,7 @@ export function createGenerator(seedInput) {
           // slope = blocks of rise per block across (1 = 45 degrees)
           const alt = height - S + sn * 6;
           const snowy = bi === BIOME.SNOWY_PEAKS || (alt > 70 && biome.snowy);
-          const steep = slope > 1.5 + sn * 0.35;
+          const steep = slope > (snowy ? 2.4 : 1.5) + sn * 0.35; // snow clings to steeper slopes
           if (steep) { top = snowy && slope < 2.2 ? B.SNOW : sn > 0.6 ? B.GRAVEL : B.STONE; filler = B.STONE; }
           else if (snowy) { top = B.SNOW; filler = slope > 0.9 ? B.STONE : B.SNOW; }
           else if (bi === BIOME.STONY_PEAKS) { top = slope > 0.8 || sn > 0.2 ? B.STONE : B.SNOWY_GRASS; filler = B.STONE; }

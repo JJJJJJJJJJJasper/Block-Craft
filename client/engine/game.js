@@ -14,6 +14,8 @@ import { raycastBlocks } from '../../shared/raycast.js';
 import { boxIntersectsBlock } from '../../shared/physics.js';
 import { createGenerator, BIOME_NAMES } from '../../shared/terrain.js';
 import { BIOME_LIST } from '../../shared/biomes.js';
+import { FarTerrain } from '../rendering/farTerrain.js';
+import { SEA_LEVEL } from '../../shared/config.js';
 import { ClientWorld } from '../world/world.js';
 import { Player } from './player.js';
 import { Input } from './input.js';
@@ -60,6 +62,7 @@ export class Game {
 
     this.input = new Input(renderer.renderer.domElement);
     this.itemModels = new ItemModels(textures);
+    this.far = new FarTerrain(renderer.scene, this.world.pool, SEA_LEVEL); // distant mountains
     this.entities = new Entities(renderer.scene, textures.icons, sfx, this.itemModels);
     this.entities.itemIdOf = (name) => ITEM_BY_NAME[name].id;
     this.hand = new HandView(this.itemModels, playerColors(this.playerName).skin);
@@ -348,6 +351,7 @@ export class Game {
     this.entities.update(dt, (x, y, z) => this.world.getBlock(x, y, z));
     const eyeBlock = this.world.getBlock(Math.floor(p.pos.x), Math.floor(p.eye.y), Math.floor(p.pos.z));
     this.renderer.updateEnvironment(this.worldTime / DAY_TICKS, eyeBlock === B.LAVA ? 'lava' : IS_LIQUID[eyeBlock] ? 'water' : null, this._inSnowyBiome(dt));
+    this.far.update(p.pos.x, p.pos.z, this.world.renderDistance, this.renderer.farEnv);
     this.hud.update(dt, this.inv, p, this.mode);
     this.hud.showPlayerList(this.input.locked && this.input.down('Tab'), this.playerList, this.hostId, this.net.ping);
     if (this.showDebug) this.hud.setDebug(true, this._debugText());
