@@ -13,6 +13,7 @@
 import { BLOCKS, FAMILIES, B, stateId, wallTorchFor, IS_SOLID, SHAPE } from './blocks.js';
 import { ITEMS } from './items.js';
 import { FACING_VEC } from './shapes.js';
+import { placeRail, RAIL_BASES } from './rails.js';
 
 const OPPOSITE = { north: 'south', south: 'north', east: 'west', west: 'east' };
 
@@ -113,6 +114,13 @@ export function placementFor(heldId, hit, dir, hitY, getBlock) {
     case 'repeater': return out(st({ facing: look }));
     case 'anvil': return out(st({ facing: look === 'north' || look === 'south' ? 'north' : 'east' }));
     case 'flat':
+      // rails pick their own shape and join up with their neighbours (only the new rail is sent;
+      // the server reshapes the neighbours the same way)
+      if (RAIL_BASES.includes(def.base)) {
+        if (!solidBelow()) return null;
+        const all = placeRail(def.base, x, y, z, look[0], getBlock);
+        return { blocks: all, send: [all[0]] };
+      }
       if (keys.includes('dir')) return out(st({ dir: look === 'east' || look === 'west' ? 'ew' : 'ns' }));
       break;
     default:

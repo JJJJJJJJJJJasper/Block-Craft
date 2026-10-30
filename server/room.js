@@ -12,16 +12,18 @@ import {
   EDIT_RATE_PER_SEC, EDIT_BURST, CHAT_RATE_PER_SEC, CHAT_BURST, SPEED_TOLERANCE,
   MAX_HEALTH, MAX_HUNGER, MAX_PLAYERS_PER_ROOM, CHUNK_HEIGHT,
 } from '../shared/config.js';
-import { BLOCKS, B, isBlockId, IS_SOLID, needsSupport, supportPos, isSupported } from '../shared/blocks.js';
+import { BLOCKS, B, isBlockId, IS_SOLID, CONNECT, needsSupport, supportPos, isSupported } from '../shared/blocks.js';
 import { isPlaceableState, canReplace } from '../shared/placement.js';
 import { Interactions } from './interact.js';
 import { Projectiles } from './projectiles.js';
+import { Vehicles } from './vehicles.js';
+import { joinNeighbours, isRail } from '../shared/rails.js';
 import { ITEMS, canHarvest, attackDamage, itemId, maxStack } from '../shared/items.js';
 import { SMELTING, SMELT_TIME } from '../shared/recipes.js';
 import { GAME_MODES, sanitizeName } from '../shared/protocol.js';
 import { moveEntity, boxIntersectsBlock } from '../shared/physics.js';
 import { ServerWorld } from './serverWorld.js';
-import { MobManager } from './mobs.js';
+import { MobManager, MOB_TYPES } from './mobs.js';
 import { saveWorld, saveWorldSync } from './persistence.js';
 
 let nextPlayerId = 1;
@@ -59,9 +61,10 @@ export class Room {
     this.furnaces = new Map(Object.entries(saved.furnaces ?? {}));
     this.players = new Map();                  // id -> player
     this.items = new Map();                    // dropped item entities
-    this.mobs = new MobManager(this);
+    this.mobs = new MobManager(this, saved);   // animals, villagers and monsters
     this.act = new Interactions(this, saved);   // doors, chests, beds, farming, TNT
     this.projectiles = new Projectiles(this);   // arrows, snowballs, eggs, ender pearls
+    this.vehicles = new Vehicles(this, saved);  // minecarts and boats
     this.hostId = null;
     this.dirty = false;
     this.emptySince = Date.now();
@@ -130,6 +133,7 @@ export class Room {
       you: { name: p.name, pos: p.pos, inv: p.inv, health: p.health, hunger: p.hunger },
       players: this.playerList(),
       items: [...this.items.values()].map(itemMsg),
+      jukeboxes: this.act.jukeboxList(),
     });
     this.broadcast({ t: 'players', list: this.playerList(), host: this.hostId }, p);
     this.sys(`${p.name} joined the world`);
@@ -139,6 +143,8 @@ export class Room {
 
   removePlayer(p, silent = false) {
     if (!this.players.has(p.id)) return;
+    this.vehicles.drop(p);
+    if (p.riding && p.riding.type === 'mob') this.mobs.unride(p);
     this.players.delete(p.id);
     this._remember(p);
     if (this.hostId === p.id) {
@@ -194,6 +200,15 @@ export class Room {
       case 'containerClose': p.container = null; return;
       case 'useMob': return this.mobs.use(p, msg);
       case 'throw': return this.projectiles.launch(p, msg);
+      case 'vplace': return this.vehicles.place(p, msg);
+      case 'vmount': return this.vehicles.mount(p, msg);
+      case 'vleave': return this.vehicles.leave(p);
+      case 'vmove': return this.vehicles.move(p, msg);
+      case 'vhit': return this.vehicles.hit(p, msg);
+      case 'mmove': return this.mobs.rideMove(p, msg);
+      case 'unride': return this.mobs.unride(p);
+      case 'stare': return this.mobs.stare(p, msg);
+      case 'firework': return this.onFirework(p, msg);
       case 'ping': return this.send(p, { t: 'pong', c: msg.c });
       default: return;
     }
@@ -208,14 +223,15 @@ export class Room {
   onPos(p, msg) {
     if (!Array.isArray(msg.p) || msg.p.length !== 3 || !msg.p.every(num)) return;
     if (Array.isArray(msg.r) && msg.r.every(num)) { p.yaw = msg.r[0]; p.pitch = msg.r[1]; }
-    p.flags = (msg.f ? 1 : 0) | (msg.m ? 2 : 0) | (msg.s ? 4 : 0);
+    p.flags = (msg.f ? 1 : 0) | (msg.m ? 2 : 0) | (msg.s ? 4 : 0) | (msg.rd && p.riding ? 8 : 0);
     p.held = int(msg.h) && ITEMS[msg.h] ? msg.h : 0; // shown in other players' hands
     if (!p.alive) return;
     const now = Date.now();
     const elapsed = Math.min(2, (now - p.lastMoveTime) / 1000);
     p.lastMoveTime = now;
     const creative = this.mode === 'creative';
-    const maxSpeed = (creative ? PHYSICS.flySprintSpeed : PHYSICS.sprintSpeed * 1.4) * SPEED_TOLERANCE;
+    // riding a minecart, boat or horse is faster than running
+    const maxSpeed = (p.riding ? 13 : creative ? PHYSICS.flySprintSpeed : PHYSICS.sprintSpeed * 1.4) * SPEED_TOLERANCE;
     p.moveCredit = Math.min(maxSpeed * 1.5, p.moveCredit + maxSpeed * elapsed);
     const [x, y, z] = msg.p;
     const dx = x - p.pos.x, dz = z - p.pos.z;
@@ -283,6 +299,8 @@ export class Room {
     const dropDef = partner && !def.drops ? BLOCKS[partner[3]] : def;
     if (survival && canHarvest(id, held)) this._dropsFor(dropDef, x + 0.5, y + 0.3, z + 0.5, held);
     this.act.broken(x, y, z, id, survival);
+    if (def.infested && survival) { this.mobs.spawn('silverfish', x + 0.5, y, z + 0.5); this.mobs.wakeSilverfish(x, y, z, 3); }
+    if (CONNECT[id] === 1) this.mobs.fenceBroken(x, y, z);
     // A furnace drops what was inside it.
     const fkey = `${x},${y},${z}`;
     const f = this.furnaces.get(fkey);
@@ -343,7 +361,7 @@ export class Room {
           if (o.alive && boxIntersectsBlock(o.pos, PHYSICS.playerWidth, PHYSICS.playerHeight, x, y, z)) return reject();
         }
         for (const m of this.mobs.mobs.values()) {
-          if (boxIntersectsBlock(m.pos, m.def.width, m.def.height, x, y, z)) return reject();
+          if (!m.def.ghost && boxIntersectsBlock(m.pos, this.mobs._w(m), this.mobs._h(m), x, y, z)) return reject();
         }
       }
     }
@@ -364,6 +382,10 @@ export class Room {
       placed.push([x, y, z, this.world.getBlock(x, y, z)]);
       this.setBlock(x, y, z, id);
       this.act.placed(x, y, z, id);
+      // a pumpkin on top of snow or iron blocks brings a golem to life
+      if (id === B.PUMPKIN || id === B.JACK_O_LANTERN) this.mobs.checkGolem(x, y, z);
+      // rails next to a new rail turn to join it
+      if (isRail(id)) for (const [rx, ry, rz, rid] of joinNeighbours(x, y, z, null, get)) this.setBlock(rx, ry, rz, rid);
     }
   }
 
@@ -374,10 +396,12 @@ export class Room {
     const now = Date.now();
     if (now < p.attackCooldown) return;
     p.attackCooldown = now + 250;
-    const d = Math.hypot(m.pos.x - p.pos.x, m.pos.y + m.def.height / 2 - (p.pos.y + PHYSICS.eyeHeight), m.pos.z - p.pos.z);
-    if (d > REACH + SERVER_REACH_SLACK + 1) return;
+    if (m.rider === p.id) return;
+    const d = Math.hypot(m.pos.x - p.pos.x, m.pos.y + this.mobs._h(m) / 2 - (p.pos.y + PHYSICS.eyeHeight), m.pos.z - p.pos.z);
+    if (d > REACH + SERVER_REACH_SLACK + 1 + this.mobs._w(m) / 2) return;
     const held = int(msg.held) ? msg.held : 0;
-    this.mobs.damage(m, attackDamage(held), p.pos);
+    this.mobs.ownerAttacked(p, m);
+    this.mobs.damage(m, attackDamage(held), p.pos, null, p.id);
   }
 
   /** PvP: in survival, players can hit each other (with knockback, armor still helps). */
@@ -391,6 +415,16 @@ export class Room {
     if (d > REACH + SERVER_REACH_SLACK + 1) return;
     const held = int(msg.held) ? msg.held : 0;
     this.hurtPlayer(o, attackDamage(held), p.pos, `was slain by ${p.name}`);
+  }
+
+  /** A firework rocket launched from (x, y, z): everyone sees it go up and burst. */
+  onFirework(p, msg) {
+    if (!p.alive || ![msg.x, msg.y, msg.z].every(num)) return;
+    if (Math.hypot(msg.x - p.pos.x, msg.y - p.pos.y, msg.z - p.pos.z) > REACH + SERVER_REACH_SLACK + 2) return;
+    const now = Date.now();
+    if (now < (p.fireworkCooldown || 0)) return;
+    p.fireworkCooldown = now + 250;
+    this.broadcast({ t: 'firework', x: r2(msg.x), y: r2(msg.y), z: r2(msg.z), seed: Math.floor(Math.random() * 1e9), by: p.id });
   }
 
   // ---- Items ------------------------------------------------------------------
@@ -454,14 +488,16 @@ export class Room {
   }
 
   // ---- Survival ------------------------------------------------------------------
-  hurtPlayer(p, amount, from, cause = 'was slain by a zombie') {
+  hurtPlayer(p, amount, from, cause = 'was slain by a zombie', noKnock = false) {
     if (this.mode !== 'survival' || !p.alive || amount <= 0) return;
-    this.send(p, { t: 'hurt', amount, from: [from.x, from.y, from.z], cause });
+    this.send(p, { t: 'hurt', amount, from: [from.x, from.y, from.z], cause, noKnock });
     this.broadcast({ t: 'phurt', id: p.id }, p); // others see the red flash
   }
 
   onDied(p, msg) {
     if (!p.alive) return;
+    this.vehicles.drop(p);
+    if (p.riding && p.riding.type === 'mob') this.mobs.unride(p);
     p.alive = false;
     p.health = 0;
     // Drop the inventory the client reported where the player died.
@@ -525,6 +561,20 @@ export class Room {
       this._unstick(p.pos);
       p.moveCredit = 4;
       this.send(p, { t: 'teleport', p: [p.pos.x, p.pos.y, p.pos.z] });
+    } else if (msg.action === 'summon' && typeof msg.value === 'string' && MOB_TYPES[msg.value]) {
+      // a mob appears a few blocks in front of you
+      const d = num(msg.dist) ? Math.max(2, Math.min(12, msg.dist)) : 3;
+      const x = p.pos.x - Math.sin(p.yaw) * d, z = p.pos.z - Math.cos(p.yaw) * d;
+      const m = this.mobs.spawn(msg.value, x, p.pos.y + 0.5, z);
+      m.persistent = true;
+      this._unstick(m.pos);
+    } else if (msg.action === 'locate' && typeof msg.value === 'string') {
+      const kind = msg.value.toLowerCase().replace(/ /g, '_');
+      const kinds = this.world.gen.STRUCTURE_KINDS;
+      if (!kinds.includes(kind)) return this.send(p, { t: 'chat', sys: true, text: `Structures: ${kinds.join(', ')}` });
+      const s = this.world.gen.locateStructure(kind, p.pos.x, p.pos.z);
+      const name = kind.replace(/_/g, ' ');
+      this.send(p, { t: 'chat', sys: true, text: s ? `The nearest ${name} is at ${Math.round(s.x)}, ${Math.round(s.z)} (${Math.round(Math.hypot(s.x - p.pos.x, s.z - p.pos.z))} blocks away)` : `No ${name} within 4000 blocks.` });
     } else if (msg.action === 'kick') {
       const target = this.players.get(msg.value);
       if (target && target !== p) this.kick(target, `Kicked by ${p.name}`);
@@ -641,7 +691,19 @@ export class Room {
   // ---- Main loop ---------------------------------------------------------------------
   tick(dt) {
     if (!this.players.size) return;
-    this.time = (this.time + dt * (DAY_TICKS / DAY_LENGTH_SECONDS)) % DAY_TICKS;
+    if (this.nightSkip) {
+      // sleeping: the clock races to morning over the cutscene
+      const s = this.nightSkip;
+      s.elapsed += dt;
+      const f = Math.min(1, s.elapsed / s.duration);
+      this.time = (s.from + s.ticks * f) % DAY_TICKS;
+      if (f >= 1) {
+        this.nightSkip = null;
+        this.broadcast({ t: 'time', time: Math.round(this.time) });
+        this.sys('Good morning!');
+        for (const m of [...this.mobs.mobs.values()]) if (m.def.hostile && m.type !== 'spider' && !m.home) this.mobs.mobs.delete(m.id);
+      }
+    } else this.time = (this.time + dt * (DAY_TICKS / DAY_LENGTH_SECONDS)) % DAY_TICKS;
     this.timeBroadcastTimer += dt;
     if (this.timeBroadcastTimer > 5) { this.timeBroadcastTimer = 0; this.broadcast({ t: 'time', time: Math.round(this.time) }); }
 
@@ -650,6 +712,15 @@ export class Room {
     this._tickFurnaces(dt);
     this.act.tick(dt);
     this.projectiles.tick(dt);
+    // Trap: stepping on a stone pressure plate with TNT hidden under it (desert temples!)
+    if ((this.trapTimer = (this.trapTimer || 0) + dt) > 0.2) {
+      this.trapTimer = 0;
+      for (const p of this.players.values()) {
+        const x = Math.floor(p.pos.x), y = Math.floor(p.pos.y + 0.01), z = Math.floor(p.pos.z);
+        if (!p.alive || this.world.getBlock(x, y, z) !== B.STONE_PRESSURE_PLATE) continue;
+        for (const dy of [2, 3]) if (this.world.getBlock(x, y - dy, z) === B.TNT) this.act.light(x, y - dy, z, 1);
+      }
+    }
 
     // Snapshot of every player and mob, ~20 times per second.
     const ps = [];
@@ -657,7 +728,7 @@ export class Room {
       if (!p.alive) continue;
       ps.push([p.id, r2(p.pos.x), r2(p.pos.y), r2(p.pos.z), r2(p.yaw), r2(p.pitch), p.flags, p.held || 0]);
     }
-    this.broadcast({ t: 'snap', p: ps, m: this.mobs.snapshot(), pr: this.projectiles.snapshot() });
+    this.broadcast({ t: 'snap', p: ps, m: this.mobs.snapshot(), pr: this.projectiles.snapshot(), v: this.vehicles.snapshot() });
   }
 
   // ---- Saving --------------------------------------------------------------------------
@@ -670,6 +741,8 @@ export class Room {
       hostToken: this.hostToken, created: this.created, savedAt: Date.now(),
       edits: this.world.serializeEdits(), players: this.savedPlayers, furnaces,
       ...this.act.serialize(),
+      vehicles: this.vehicles.serialize(),
+      mobs: this.mobs.serialize(), mobKills: [...this.mobs.kills],
     };
   }
 

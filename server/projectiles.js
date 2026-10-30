@@ -15,6 +15,7 @@ export const PROJECTILES = {
   snowball: { index: 1, gravity: 24, speed: 24 },
   egg: { index: 2, gravity: 24, speed: 24 },
   pearl: { index: 3, gravity: 24, speed: 24 },
+  potion: { index: 4, gravity: 20, speed: 16 },   // thrown by witches
 };
 const num = (v) => typeof v === 'number' && Number.isFinite(v);
 const r2 = (v) => Math.round(v * 100) / 100;
@@ -66,8 +67,10 @@ export class Projectiles {
       if (block) best = { t: block.dist, block };
       for (const m of room.mobs.mobs.values()) {
         if (m === pr.owner && pr.age < 0.5) continue;
-        const w = m.def.width / 2;
-        const t = rayBox(origin, dir, [m.pos.x - w, m.pos.y, m.pos.z - w], [m.pos.x + w, m.pos.y + m.def.height, m.pos.z + w]);
+        if (pr.owner.def && pr.owner.def.golem && !m.def.hostile) continue; // golems don't hit their friends
+        if (m.rider && m.rider === pr.owner.id) continue;
+        const w = room.mobs._w(m) / 2;
+        const t = rayBox(origin, dir, [m.pos.x - w, m.pos.y, m.pos.z - w], [m.pos.x + w, m.pos.y + room.mobs._h(m), m.pos.z + w]);
         if (t >= 0 && t <= dist && (!best || t < best.t)) best = { t, mob: m };
       }
       for (const o of room.players.values()) {
@@ -86,14 +89,20 @@ export class Projectiles {
   _hit(pr, hit, at) {
     const room = this.room;
     const from = { x: at.x - pr.vel.x * 0.05, y: at.y - 1, z: at.z - pr.vel.z * 0.05 };
+    // who threw it: a mob (skeletons, witches, snow golems) or a player
+    const byMob = pr.owner.def ? pr.owner : null, byPlayer = pr.owner.ws ? pr.owner.id : null;
+    const cause = byMob ? byMob.def.cause : `was shot by ${pr.owner.name}`;
     if (pr.kind === 'arrow') {
       const dmg = Math.max(1, Math.round(pr.power * pr.power * 9));
-      if (hit.mob) room.mobs.damage(hit.mob, dmg, from);
-      else if (hit.player) room.hurtPlayer(hit.player, dmg, from, `was shot by ${pr.owner.name || 'a skeleton'}`);
+      if (hit.mob) room.mobs.damage(hit.mob, dmg, from, byMob, byPlayer);
+      else if (hit.player) room.hurtPlayer(hit.player, dmg, from, cause);
       // A survival player's arrow can be picked up again where it landed.
       else if (room.mode === 'survival') room.spawnItem({ id: itemId('arrow'), count: 1 }, at.x, at.y + 0.2, at.z, { x: 0, y: 0, z: 0 });
+    } else if (pr.kind === 'potion') {
+      // a witch's splash potion: hurts everyone it splashes
+      for (const o of room.players.values()) if (o.alive && Math.hypot(o.pos.x - at.x, o.pos.y + 1 - at.y, o.pos.z - at.z) < 3) room.hurtPlayer(o, 4, from, cause, true);
     } else if (pr.kind === 'snowball') {
-      if (hit.mob) room.mobs.damage(hit.mob, 0, from);
+      if (hit.mob) room.mobs.damage(hit.mob, 0, from, byMob, byPlayer);
       else if (hit.player) room.hurtPlayer(hit.player, 0.5, from, `was snowballed by ${pr.owner.name}`);
     } else if (pr.kind === 'egg') {
       if (Math.random() < 1 / 8) {

@@ -8,7 +8,7 @@
 //   - buckets, cake, TNT
 // The Room owns one Interactions object and forwards messages to it.
 // ============================================================================
-import { BLOCKS, B, FAMILIES, withState, stateId, IS_SOLID } from '../shared/blocks.js';
+import { BLOCKS, B, FAMILIES, withState, stateId, IS_SOLID, CONNECT } from '../shared/blocks.js';
 import { ITEMS, ITEM_BY_NAME, itemId, maxStack } from '../shared/items.js';
 import { FACING_VEC } from '../shared/shapes.js';
 import { canReplace } from '../shared/placement.js';
@@ -31,7 +31,26 @@ const LOOT = [
   ['golden_horse_armor', 1, 1, 10], ['diamond_horse_armor', 1, 1, 5], ['music_disc_ember', 1, 1, 8], ['music_disc_tide', 1, 1, 8],
   ['diamond', 1, 2, 3], ['emerald', 1, 2, 4], ['chainmail_chestplate', 1, 1, 3], ['enchanted_golden_apple', 1, 1, 1],
 ];
-const LOOT_TOTAL = LOOT.reduce((a, l) => a + l[3], 0);
+// Each kind of structure has its own chest loot.
+const LOOT_TABLES = {
+  dungeon: LOOT,
+  mineshaft: [['rail', 4, 8, 20], ['powered_rail', 1, 4, 5], ['torch', 1, 16, 15], ['bread', 1, 3, 15], ['coal', 3, 8, 10], ['iron_ingot', 1, 5, 10],
+    ['gold_ingot', 1, 3, 5], ['redstone', 4, 9, 5], ['lapis_lazuli', 4, 9, 5], ['diamond', 1, 2, 3], ['melon_seeds', 2, 4, 10], ['pumpkin_seeds', 2, 4, 10],
+    ['beetroot_seeds', 2, 4, 10], ['name_tag', 1, 1, 30], ['golden_apple', 1, 1, 20], ['iron_pickaxe', 1, 1, 5], ['enchanted_book', 1, 1, 10], ['enchanted_golden_apple', 1, 1, 1]],
+  desert_temple: [['bone', 4, 6, 25], ['rotten_flesh', 3, 7, 16], ['spider_eye', 1, 3, 25], ['gold_ingot', 2, 7, 15], ['iron_ingot', 1, 5, 15], ['emerald', 1, 3, 15],
+    ['diamond', 1, 3, 5], ['sand', 1, 8, 10], ['saddle', 1, 1, 20], ['iron_horse_armor', 1, 1, 15], ['golden_horse_armor', 1, 1, 10], ['diamond_horse_armor', 1, 1, 5],
+    ['enchanted_book', 1, 1, 20], ['golden_apple', 1, 1, 20], ['enchanted_golden_apple', 1, 1, 2]],
+  jungle_temple: [['bone', 4, 6, 20], ['rotten_flesh', 3, 7, 16], ['gold_ingot', 2, 7, 15], ['iron_ingot', 1, 5, 15], ['emerald', 1, 3, 2], ['diamond', 1, 3, 3],
+    ['saddle', 1, 1, 3], ['iron_horse_armor', 1, 1, 1], ['golden_horse_armor', 1, 1, 1], ['diamond_horse_armor', 1, 1, 1], ['enchanted_book', 1, 1, 1]],
+  igloo: [['apple', 1, 3, 15], ['coal', 1, 4, 15], ['gold_nugget', 1, 3, 10], ['stone_axe', 1, 1, 2], ['rotten_flesh', 1, 1, 10], ['emerald', 1, 1, 1],
+    ['wheat', 2, 3, 10], ['golden_apple', 1, 1, 3]],
+  mansion: [['lead', 1, 1, 20], ['golden_apple', 1, 1, 15], ['enchanted_golden_apple', 1, 1, 2], ['music_disc_dusk', 1, 1, 15], ['music_disc_echo', 1, 1, 15],
+    ['name_tag', 1, 1, 20], ['chainmail_chestplate', 1, 1, 10], ['diamond_hoe', 1, 1, 15], ['diamond_chestplate', 1, 1, 5], ['enchanted_book', 1, 1, 10],
+    ['bread', 1, 4, 20], ['wheat', 1, 4, 20], ['coal', 1, 4, 15], ['redstone', 1, 4, 15], ['beetroot_seeds', 2, 4, 10], ['melon_seeds', 2, 4, 10],
+    ['iron_ingot', 1, 4, 10], ['gold_ingot', 1, 4, 5], ['bucket', 1, 1, 10]],
+  village: [['apple', 1, 3, 15], ['bread', 1, 3, 15], ['wheat', 2, 6, 10], ['iron_ingot', 1, 3, 8], ['emerald', 1, 2, 3], ['oak_sapling', 2, 4, 8],
+    ['torch', 2, 6, 8], ['iron_sword', 1, 1, 3], ['saddle', 1, 1, 2], ['obsidian', 1, 4, 3], ['gold_ingot', 1, 2, 3]],
+};
 
 export class Interactions {
   constructor(room, saved) {
@@ -39,7 +58,8 @@ export class Interactions {
     this.containers = new Map(Object.entries(saved.containers ?? {})); // "x,y,z" -> slots
     this.plants = new Set(saved.plants ?? []);                         // growing crops, saplings, cane
     this.tnt = [];
-    this.fires = [];                                                   // burning fire blocks: {x, y, z, t}                                                     // lit TNT: {x, y, z, t}
+    this.fires = [];                                                   // burning fire blocks: {x, y, z, t}
+    this.jukeboxes = new Map(Object.entries(saved.jukeboxes ?? {}));   // "x,y,z" -> disc item id
     this.growTimer = 0;
   }
 
@@ -48,7 +68,7 @@ export class Interactions {
   serialize() {
     const containers = {};
     for (const [k, slots] of this.containers) if (slots.some(Boolean)) containers[k] = slots;
-    return { containers, plants: [...this.plants] };
+    return { containers, plants: [...this.plants], jukeboxes: Object.fromEntries(this.jukeboxes) };
   }
 
   /** Called whenever a block is placed, so new crops start growing etc. */
@@ -94,6 +114,22 @@ export class Interactions {
     }
     const partner = this.partnerOf(id, x, y, z);
     if (partner) this.room.setBlock(partner[0], partner[1], partner[2], 0);
+    if (this.jukeboxes.has(k)) this._eject(x, y, z);
+  }
+
+  // ---- Jukeboxes -----------------------------------------------------------------------
+  /** Discs playing right now, for players who just joined: [[x, y, z, discName], ...] */
+  jukeboxList() {
+    return [...this.jukeboxes].map(([k, id]) => [...k.split(',').map(Number), ITEMS[id]?.name]);
+  }
+
+  _eject(x, y, z) {
+    const k = key3(x, y, z);
+    const disc = this.jukeboxes.get(k);
+    this.jukeboxes.delete(k);
+    if (disc) this.room.spawnItem({ id: disc, count: 1, dmg: 0 }, x + 0.5, y + 1.1, z + 0.5);
+    this.room.broadcast({ t: 'jukebox', x, y, z, disc: null });
+    this.room.dirty = true;
   }
 
   // ---- Right-click on a block -------------------------------------------------------
@@ -118,6 +154,7 @@ export class Interactions {
         return;
       }
       case 'open': return this.openContainer(p, x, y, z, id);
+      case 'leash': return CONNECT[id] === 1 ? room.mobs.tieToFence(p, x, y, z) : undefined; // tie (or untie) animals to a fence post
       case 'sleep': return this.sleep(p, x, y, z, b);
       case 'till': {
         if (!held || held.tool !== 'hoe' || this.world.getBlock(x, y + 1, z) !== 0) return;
@@ -162,6 +199,15 @@ export class Interactions {
         }
         return;
       }
+      case 'jukebox': {
+        if (id !== FAMILIES.jukebox.baseId) return;
+        if (this.jukeboxes.has(key3(x, y, z))) return this._eject(x, y, z);
+        if (!held || !held.name.startsWith('music_disc_')) return;
+        this.jukeboxes.set(key3(x, y, z), held.id);
+        room.broadcast({ t: 'jukebox', x, y, z, disc: held.name });
+        room.dirty = true;
+        return;
+      }
       case 'cake': {
         if (b.base !== 'cake') return;
         const bites = b.state.bites + 1;
@@ -181,7 +227,7 @@ export class Interactions {
     let slots = this.containers.get(k);
     if (b.loot) {
       // A dungeon chest: roll its loot once, then it becomes an ordinary chest.
-      slots = this.rollLoot(size);
+      slots = this.rollLoot(size, this._lootTable(x, y, z));
       this.containers.set(k, slots);
       this.room.setBlock(x, y, z, stateId('chest', { facing: 'south' }));
     }
@@ -190,12 +236,22 @@ export class Interactions {
     this.room.send(p, { t: 'container', x, y, z, kind: b.container, slots });
   }
 
-  rollLoot(size) {
+  /** Which loot table a generated chest uses: the structure it's in. */
+  _lootTable(x, y, z) {
+    const gen = this.world.gen;
+    const kind = gen.structureAt?.(x, y, z);
+    if (kind && LOOT_TABLES[kind]) return LOOT_TABLES[kind];
+    if (gen.villageNear(x, z, 48)) return LOOT_TABLES.village;
+    return LOOT_TABLES.dungeon;
+  }
+
+  rollLoot(size, table = LOOT) {
     const slots = new Array(size).fill(null);
     const n = rnd(4, 8);
+    const total = table.reduce((a, l) => a + l[3], 0);
     for (let i = 0; i < n; i++) {
-      let pick = Math.random() * LOOT_TOTAL, entry = LOOT[0];
-      for (const l of LOOT) { if ((pick -= l[3]) < 0) { entry = l; break; } }
+      let pick = Math.random() * total, entry = table[0];
+      for (const l of table) { if ((pick -= l[3]) < 0) { entry = l; break; } }
       const [name, min, max] = entry;
       if (!ITEM_BY_NAME[name]) continue;
       const id = itemId(name);
@@ -227,10 +283,13 @@ export class Interactions {
     p.sleptAt = Date.now();
     const players = [...room.players.values()].filter(o => o.alive);
     const asleep = players.filter(o => o.sleptAt && Date.now() - o.sleptAt < 8000).length;
-    if (asleep >= players.length) {
-      room.time = Math.round(DAY_TICKS * 0.98) % DAY_TICKS; // just before sunrise
-      room.broadcast({ t: 'time', time: room.time });
-      room.sys('Everyone slept. Good morning!');
+    if (asleep >= players.length && !room.nightSkip) {
+      // Everyone's in bed: fast-forward through the rest of the night while
+      // every player watches the sunrise cutscene.
+      const from = room.time, to = Math.round(DAY_TICKS * 0.04);
+      const ticks = (to - from + DAY_TICKS) % DAY_TICKS;
+      room.nightSkip = { from, ticks, elapsed: 0, duration: 14 };
+      room.broadcast({ t: 'cutscene', from, ticks, duration: 14 });
       for (const o of players) o.sleptAt = 0;
     } else {
       room.sys(`${p.name} is sleeping (${asleep}/${players.length}). Everyone needs a bed to skip the night.`);

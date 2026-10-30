@@ -46,7 +46,7 @@ const FRAG = /* glsl */`
     if (d < innerRadius) discard;  // the real chunks are drawn here
     vec3 n = normalize(vNormal);
     float sun = max(dot(n, sunDir), 0.0);
-    float light = (0.55 + 0.45 * sun) * (0.07 + 0.93 * pow(0.8, (1.0 - daylight) * 15.0));
+    float light = (0.55 + 0.45 * sun) * (0.13 + 0.87 * pow(0.8, (1.0 - daylight) * 15.0));
     vec3 col = vColor / 255.0 * light * sunTint;
     // Aerial haze: the further away, the more it fades into the blue air.
     float haze = 1.0 - exp(-d * 0.0016);

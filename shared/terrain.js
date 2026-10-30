@@ -15,7 +15,7 @@
 //      range, ridged noise builds sharp crests up to ~180 blocks above the sea.
 //   2. Fill: bedrock -> stone -> biome filler -> biome surface -> water/ice.
 //   3. Caves: noise "spaghetti" tunnels, plus random-walk "worm" tunnels,
-//      rooms and ravines (Minecraft-style carvers). Lava fills cave floors
+//      rooms and ravines (classic-style carvers). Lava fills cave floors
 //      below y=10.
 //   4. Ores and stone variants (granite, diorite, andesite) as random veins.
 //   5. Trees and large features (huge mushrooms, ice spikes) per biome.
@@ -29,6 +29,7 @@ import { B, IS_SOLID, IS_LIQUID, SHAPE, MAX_ID, stateId } from './blocks.js';
 import { FACINGS } from './shapes.js';
 import { BIOME_LIST, BIOME, BIOME_NAMES } from './biomes.js';
 import { Simplex, hashSeed, hash2, hash3, mulberry32 } from './noise.js';
+import { createStructures, OP } from './structures.js';
 
 export { BIOME_NAMES };
 const LAYER = CS * CS;
@@ -66,6 +67,7 @@ export function createGenerator(seedInput) {
   const nRiver = n(6), nDetail = n(7), nMush = n(8), nSurface = n(9);
   const nCaveA = n(10), nCaveB = n(11), nCavern = n(12);
   const nRange = n(13), nRidge = n(14), nPeak = n(15);
+  const nOver = n(16);
 
   // Badlands terracotta stripes: a fixed random colour per height, per world.
   const bandRand = mulberry32(seed ^ 0xba7d);
@@ -299,6 +301,23 @@ export function createGenerator(seedInput) {
     }
   }
 
+  // ---- Lakes ---------------------------------------------------------------
+  // Now and then a chunk has a small lake sunk into the ground: water in green
+  // lowlands, and (rarely) lava anywhere. Each fits inside its own chunk.
+  const DRY = new Set([BIOME.DESERT, BIOME.BADLANDS, BIOME.BADLANDS_PLATEAU, BIOME.SAVANNA_PLATEAU]);
+  function lakeIn(cx, cz) {
+    const roll = hash2(seed ^ 0x1a4e, cx, cz);
+    const lava = roll > 0.994;
+    if (roll > 0.045 && !lava) return null;
+    const lx = 6 + Math.floor(hash2(seed ^ 0x1a4f, cx, cz) * 4), lz = 6 + Math.floor(hash2(seed ^ 0x1a50, cx, cz) * 4);
+    const x = cx * CS + lx, z = cz * CS + lz;
+    const col = column(x, z);
+    if (col.height <= S + 1 || col.height > S + 70) return null;
+    if (!lava && (DRY.has(col.biome) || MOUNTAIN_BIOMES.has(col.biome))) return null;
+    return { lava, lx, lz, x, z, rx: 3 + hash2(seed ^ 0x1a51, cx, cz) * 1.5, rz: 3 + hash2(seed ^ 0x1a52, cx, cz) * 1.5,
+      depth: 2 + Math.floor(hash2(seed ^ 0x1a53, cx, cz) * 3), snowy: BIOME_LIST[col.biome].snowy };
+  }
+
   // ---- Trees and big features ----------------------------------------------
   // The world is divided into 5x5 cells; each cell has one candidate position
   // chosen by hashing the cell coordinate, and the biome decides how likely a
@@ -311,6 +330,11 @@ export function createGenerator(seedInput) {
     const col = column(tx, tz);
     const biome = BIOME_LIST[col.biome];
     const [chance, kinds] = biome.trees;
+    // nothing grows where a lake is
+    const lake = lakeIn(Math.floor(tx / CS), Math.floor(tz / CS));
+    if (lake && ((tx - lake.x) / (lake.rx + 2)) ** 2 + ((tz - lake.z) / (lake.rz + 2)) ** 2 < 1) return null;
+    // mossy boulders in the giant taigas
+    if (col.biome === BIOME.GIANT_TREE_TAIGA && hash2(seed ^ 0xb01d, cellX, cellZ) < 0.05 && col.height > S) return { x: tx, z: tz, y: col.height, kind: 'boulder' };
     if (!kinds.length || hash2(seed ^ 0x51ed, cellX, cellZ) >= chance) return null;
     if (col.height <= S) return null;
     if (col.height > S + 95) return null; // above the tree line
@@ -482,6 +506,12 @@ export function createGenerator(seedInput) {
           disc(top, 3, B.BROWN_MUSHROOM_BLOCK, 1);
         }
         trunk(B.MUSHROOM_STEM, h); ground();
+        break;
+      }
+      case 'boulder': {
+        const rad = 1 + Math.floor(r() * 2);
+        blob(x, y, z, rad, B.MOSSY_COBBLESTONE);
+        if (r() < 0.5) blob(x + 1, y - 1, z + 1, rad, B.MOSSY_COBBLESTONE);
         break;
       }
       case 'ice_spike': {
@@ -772,6 +802,7 @@ export function createGenerator(seedInput) {
     const ox = cx * CS, oz = cz * CS;
     const heights = new Int16Array(LAYER);
     const biomes = new Uint8Array(LAYER);
+    const slopes = new Float32Array(LAYER);
     const idx = (x, y, z) => x + z * CS + y * LAYER;
     // Heights two blocks beyond the chunk edge too, to measure how steep each column is.
     const RW = CS + 4;
@@ -800,6 +831,7 @@ export function createGenerator(seedInput) {
         const rh = (dx, dz) => ring[(x + 2 + dx) + (z + 2 + dz) * RW];
         const slope = Math.max(Math.abs(rh(2, 0) - rh(-2, 0)), Math.abs(rh(0, 2) - rh(0, -2)),
           Math.abs(rh(2, 2) - rh(-2, -2)) * 0.7, Math.abs(rh(2, -2) - rh(-2, 2)) * 0.7) / 2;
+        slopes[x + z * CS] = slope;
         const sn = nSurface.noise2(wx / 16, wz / 16);
         let top = B[biome.top.toUpperCase()], filler = B[biome.filler.toUpperCase()];
         const underwater = height < S;
@@ -877,6 +909,7 @@ export function createGenerator(seedInput) {
       [B.COAL_ORE, 16, 9, 5, 140], [B.IRON_ORE, 9, 6, 5, 66], [B.GOLD_ORE, 2.5, 6, 5, 30],
       [B.REDSTONE_ORE, 4, 6, 5, 16], [B.LAPIS_ORE, 1.2, 5, 8, 30], [B.DIAMOND_ORE, 1.3, 5, 4, 15],
       [B.EMERALD_ORE, mountainous ? 6 : 0, 1, 5, 120],
+      [B.INFESTED_STONE, mountainous ? 7 : 0, 8, 5, 64],   // silverfish hide in mountain stone
     ];
     for (const [ore, count, size, minY, maxY] of ores) {
       let k = Math.floor(count) + (rand() < count % 1 ? 1 : 0);
@@ -890,6 +923,62 @@ export function createGenerator(seedInput) {
           if (dir === 0) x = Math.min(CS - 1, x + 1); else if (dir === 1) x = Math.max(0, x - 1);
           else if (dir === 2) z = Math.min(CS - 1, z + 1); else if (dir === 3) z = Math.max(0, z - 1);
           else if (dir === 4) y = Math.min(maxY, y + 1); else y = Math.max(minY, y - 1);
+        }
+      }
+    }
+
+    // ---- 4b. overhangs: hollows cut under steep hillsides, so cliffs lean out over you ----
+    for (let z = 0; z < CS; z++) for (let x = 0; x < CS; x++) {
+      const k = x + z * CS, height = heights[k];
+      if (slopes[k] < 1.1 || height < S + 8) continue;
+      const wx = ox + x, wz = oz + z;
+      for (let y = Math.max(S + 3, height - 9); y <= height - 3; y++) {
+        // strongest a few blocks under the surface, fading out deeper down
+        const depth = height - y;
+        if (nOver.noise3(wx / 11, y / 6, wz / 11) > 0.42 + Math.abs(depth - 5) * 0.06) {
+          const i = idx(x, y, z);
+          if (blocks[i] !== B.BEDROCK && !IS_LIQUID[blocks[i]] && !IS_LIQUID[blocks[i + LAYER]]) blocks[i] = B.AIR;
+        }
+      }
+    }
+
+    // ---- 4c. a lake? ----
+    const lake = lakeIn(cx, cz);
+    if (lake) {
+      const inside = (x, z, grow = 0) => ((x - lake.lx) / (lake.rx + grow)) ** 2 + ((z - lake.lz) / (lake.rz + grow)) ** 2;
+      // the water settles at the lowest point of the rim, so it can't spill out
+      let level = Infinity;
+      for (let z = 0; z < CS; z++) for (let x = 0; x < CS; x++) if (inside(x, z, 1.5) < 1 && inside(x, z) >= 1) level = Math.min(level, heights[x + z * CS]);
+      level -= 1;
+      const fluid = lake.lava ? B.LAVA : B.WATER;
+      const cells = [];
+      let ok = level > S && level >= heights[lake.lx + lake.lz * CS] - 8;
+      for (let z = 0; z < CS && ok; z++) for (let x = 0; x < CS && ok; x++) {
+        const d = inside(x, z);
+        if (d >= 1) continue;
+        const bottom = level - Math.max(1, Math.round(lake.depth * (1 - d)));
+        cells.push([x, z, bottom]);
+        // a cave or an overhang right next to the water would let it leak
+        for (let y = bottom; y <= level && ok; y++) for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          const nx = x + dx, nz = z + dz;
+          if (nx < 0 || nz < 0 || nx >= CS || nz >= CS || inside(nx, nz) < 1) continue;
+          if (!IS_SOLID[blocks[idx(nx, y, nz)]]) ok = false;
+        }
+        if (!IS_SOLID[blocks[idx(x, bottom, z)]]) ok = false;
+      }
+      if (ok) {
+        for (const [x, z, bottom] of cells) {
+          const h = heights[x + z * CS];
+          for (let y = bottom + 1; y <= Math.max(h, level + 1); y++) blocks[idx(x, y, z)] = y <= level ? (y === level && lake.snowy && !lake.lava ? B.ICE : fluid) : B.AIR;
+          const floor = idx(x, bottom, z);
+          if (lake.lava) blocks[floor] = B.STONE;
+          else if (blocks[floor] === B.GRASS || blocks[floor] === B.SNOWY_GRASS) blocks[floor] = B.DIRT;
+        }
+        // lava bakes the ground around it to stone
+        if (lake.lava) for (const [x, z, bottom] of cells) for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          const nx = x + dx, nz = z + dz;
+          if (nx < 0 || nz < 0 || nx >= CS || nz >= CS) continue;
+          for (let y = bottom; y <= level; y++) { const i = idx(nx, y, nz); if (blocks[i] !== B.LAVA && IS_SOLID[blocks[i]]) blocks[i] = B.STONE; }
         }
       }
     }
@@ -977,6 +1066,54 @@ export function createGenerator(seedInput) {
       }
     }
 
+    // ---- 6e. desert wells and buried fossils ----
+    {
+      const roll = hash2(seed ^ 0xde11, cx, cz);
+      const mid = 8 + 8 * CS, h = heights[mid], bi = biomes[mid];
+      if (bi === BIOME.DESERT && roll < 0.004 && h > S && Math.abs(heights[6 + 6 * CS] - h) <= 1 && Math.abs(heights[10 + 10 * CS] - h) <= 1) {
+        // a little sandstone well with water in the middle
+        for (let dz = -2; dz <= 2; dz++) for (let dx = -2; dx <= 2; dx++) {
+          blocks[idx(8 + dx, h, 8 + dz)] = B.SANDSTONE;
+          for (let y = h + 1; y <= h + 5; y++) blocks[idx(8 + dx, y, 8 + dz)] = B.AIR;
+        }
+        for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) {
+          blocks[idx(8 + dx, h + 1, 8 + dz)] = (dx || dz) ? B.SANDSTONE : B.WATER;
+          if (Math.abs(dx) === 1 && Math.abs(dz) === 1) { blocks[idx(8 + dx, h + 2, 8 + dz)] = B.SANDSTONE; blocks[idx(8 + dx, h + 3, 8 + dz)] = B.SANDSTONE; }
+          blocks[idx(8 + dx, h + 4, 8 + dz)] = (dx || dz) ? stateId('sandstone_slab', { half: 'bottom' }) : B.SANDSTONE;
+        }
+        blocks[idx(8, h, 8)] = B.WATER;
+      } else if ((bi === BIOME.DESERT || bi === BIOME.SWAMP) && roll > 0.985 && B.BONE_BLOCK) {
+        // the bones of something huge, deep in the rock: a spine and a row of ribs
+        const y0 = 34 + Math.floor(hash2(seed ^ 0xf055, cx, cz) * 16);
+        const bone = (x, y, z) => { const i = idx(x, y, z); if (IS_SOLID[blocks[i]] && blocks[i] !== B.BEDROCK) blocks[i] = B.BONE_BLOCK; };
+        for (let x = 3; x <= 12; x++) {
+          bone(x, y0 + 3, 8);
+          if (x % 2 === 0 && x > 3 && x < 12) for (const s of [1, -1]) { bone(x, y0 + 3, 8 + s); bone(x, y0 + 2, 8 + 2 * s); bone(x, y0 + 1, 8 + 3 * s); bone(x, y0, 8 + 3 * s); }
+        }
+        bone(2, y0 + 3, 8); bone(1, y0 + 3, 8); bone(1, y0 + 2, 8); bone(13, y0 + 2, 8);
+      }
+    }
+
+    // ---- 6d. structures: mineshafts, temples, huts, igloos, monuments, mansions ----
+    for (const list of structures.opsForChunk(cx, cz)) {
+      for (let k = 0; k < list.length; k += 5) {
+        const lx = list[k] - ox, y = list[k + 1], lz = list[k + 2] - oz, id = list[k + 3], mode = list[k + 4];
+        const i = idx(lx, y, lz), cur = blocks[i];
+        if (mode === OP.SET) blocks[i] = id;
+        else if (mode === OP.CARVE) { if (!IS_LIQUID[cur] && cur !== B.BEDROCK) blocks[i] = id; }
+        else if (mode === OP.IF_AIR) { if (!IS_SOLID[cur]) blocks[i] = id; }
+        else if (mode === OP.IF_SOLID) { if (IS_SOLID[cur] && cur !== B.BEDROCK) blocks[i] = id; }
+        else if (mode === OP.SOFT) { if (SOFT[cur]) blocks[i] = id; }
+        else if (mode === OP.FILL_DOWN) {
+          for (let yy = y; yy > 0; yy--) {
+            const j = idx(lx, yy, lz);
+            if (IS_SOLID[blocks[j]] && !SOFT[blocks[j]]) break;
+            blocks[j] = id;
+          }
+        }
+      }
+    }
+
     // ---- 7. villages ----
     for (const v of villagesTouching(ox, oz, ox + CS - 1, oz + CS - 1)) {
       const ops = v.ops;
@@ -1021,5 +1158,15 @@ export function createGenerator(seedInput) {
   /** Grow a tree from a sapling: calls put(x, y, z, id, soft) for each block. */
   function growTree(kind, x, y, z, put) { drawFeature({ x, y, z, kind }, put); }
 
-  return { seed, column, generateChunk, findSpawn, villageNear, growTree };
+  const structures = createStructures(seed, column);
+  /** Which monster a cage at (x, y, z) makes: cave spiders in mineshafts, else zombies, skeletons or spiders. */
+  function spawnerMob(x, y, z) {
+    if (structures.at(x, y, z) === 'mineshaft') return 'cave_spider';
+    const h = hash3(seed ^ 0x5b, x, y, z);
+    return h < 0.5 ? 'zombie' : h < 0.75 ? 'skeleton' : 'spider';
+  }
+
+  return { seed, column, generateChunk, findSpawn, villageNear, growTree, spawnerMob,
+    structuresNear: (x, z, r) => structures.near(x, z, r), structureAt: (x, y, z) => structures.at(x, y, z),
+    locateStructure: (kind, x, z) => (kind === 'village' ? villageNear(x, z, 4000) : structures.locate(kind, x, z)), STRUCTURE_KINDS: ['village', ...structures.kinds] };
 }

@@ -51,6 +51,7 @@ export class Sfx {
   get ready() { return this.ctx && this.ctx.state === 'running' && !this.muted && this.volume > 0; }
 
   _noise(filterType, freq, q, dur, gain, when = 0) {
+    if (!(gain > 0.0005)) return; // too quiet (or far away) to hear
     const ctx = this.ctx, t = ctx.currentTime + when;
     const src = ctx.createBufferSource();
     src.buffer = this.noise;
@@ -66,6 +67,7 @@ export class Sfx {
   }
 
   _tone(type, f0, f1, dur, gain, when = 0) {
+    if (!(gain > 0.0005)) return;
     const ctx = this.ctx, t = ctx.currentTime + when;
     const o = ctx.createOscillator();
     o.type = type;
@@ -137,6 +139,12 @@ export class Sfx {
   rattle(dist) { const v = this._dist(dist); if (this.ready && v > 0) for (let i = 0; i < 3; i++) this._noise('bandpass', 2600, 6, 0.04, 0.2 * v, i * 0.07); }
   hiss(dist) { const v = this._dist(dist); if (this.ready && v > 0) this._noise('highpass', 4000, 0.8, 0.35, 0.15 * v); }
   rumble(dist) { const v = this._dist(dist); if (this.ready && v > 0) { this._tone('sawtooth', 70, 50, 0.5, 0.08 * v); this._noise('lowpass', 300, 1, 0.5, 0.25 * v); } }
+
+  /** A soft rising chord as the sun comes up in the sleep cutscene. */
+  dawn() {
+    if (!this.ready) return;
+    [262, 330, 392, 523].forEach((f, i) => this._tone('sine', f, f * 1.002, 2.8, 0.07, i * 0.35));
+  }
 
   /** A hissing fuse (lit TNT). */
   fuse(dist) {
@@ -212,6 +220,35 @@ export class Sfx {
     if (v <= 0) return;
     this._tone('sawtooth', 110, 80, 0.6, 0.1 * v);
     this._noise('lowpass', 400, 1, 0.5, 0.06 * v);
+  }
+
+  // ---- The other animals and monsters (all simple synthesized sounds) ----
+  _say(dist, fn) { const v = this._dist(dist); if (this.ready && v > 0) fn(v); }
+  bark(dist) { this._say(dist, v => { this._tone('square', 520, 260, 0.08, 0.08 * v); this._tone('square', 480, 240, 0.08, 0.07 * v, 0.16); }); }
+  meow(dist) { this._say(dist, v => { this._tone('triangle', 600, 900, 0.12, 0.08 * v); this._tone('triangle', 900, 500, 0.2, 0.08 * v, 0.12); }); }
+  neigh(dist) { this._say(dist, v => { for (let i = 0; i < 5; i++) this._tone('sawtooth', 700 - i * 60, 600 - i * 60, 0.07, 0.06 * v, i * 0.07); }); }
+  bray(dist) { this._say(dist, v => { this._tone('sawtooth', 300, 500, 0.25, 0.08 * v); this._tone('sawtooth', 500, 250, 0.35, 0.08 * v, 0.25); }); }
+  squish(dist) { this._say(dist, v => { this._noise('lowpass', 500, 2, 0.15, 0.2 * v); this._tone('sine', 160, 90, 0.15, 0.1 * v); }); }
+  cackle(dist) { this._say(dist, v => { for (let i = 0; i < 4; i++) this._tone('square', 700 + (i % 2) * 120, 600, 0.06, 0.05 * v, i * 0.09); }); }
+  clank(dist) { this._say(dist, v => { this._tone('square', 140, 90, 0.2, 0.08 * v); this._noise('bandpass', 1800, 4, 0.15, 0.1 * v); }); }
+  bubble(dist) { this._say(dist, v => { for (let i = 0; i < 3; i++) this._tone('sine', 300 + i * 120, 600 + i * 120, 0.08, 0.06 * v, i * 0.1); }); }
+  squeak(dist) { this._say(dist, v => this._tone('sine', 2400, 3000, 0.06, 0.04 * v)); }
+  growl(dist) { this._say(dist, v => { this._tone('sawtooth', 90, 70, 0.6, 0.1 * v); this._noise('lowpass', 250, 1, 0.6, 0.12 * v); }); }
+  chirp(dist) { this._say(dist, v => { this._tone('sine', 1800, 2600, 0.05, 0.05 * v); this._tone('sine', 2000, 2800, 0.05, 0.05 * v, 0.08); }); }
+  whisper(dist) { this._say(dist, v => { this._noise('bandpass', 700, 3, 0.9, 0.08 * v); this._tone('sine', 220, 207, 0.9, 0.03 * v); }); }
+  hrm(dist) { this._say(dist, v => this._tone('sawtooth', 150, 120, 0.25, 0.08 * v)); }
+  heart() { if (this.ready) { this._tone('sine', 880, 880, 0.12, 0.05); this._tone('sine', 1320, 1320, 0.15, 0.04, 0.1); } }
+  zap(dist) { this._say(dist, v => { this._tone('sawtooth', 200, 1200, 1.8, 0.04 * v); }); }
+  snap(dist) { this._say(dist, v => { this._noise('bandpass', 1200, 2, 0.08, 0.2 * v); this._tone('square', 240, 120, 0.08, 0.06 * v); }); }
+  spell(dist) { this._say(dist, v => { for (let i = 0; i < 4; i++) this._tone('triangle', 400 + i * 200, 600 + i * 200, 0.2, 0.04 * v, i * 0.08); }); }
+  /** Firework: a whoosh going up, then a bang and crackles (quieter far away). */
+  launch(dist) { this._say(dist, v => this._noise('bandpass', 1400, 1.5, 0.6, 0.18 * v)); }
+  burst(dist) {
+    const v = Math.max(0, 1 - (dist || 0) / 120);
+    if (!this.ready || v <= 0) return;
+    const delay = (dist || 0) / 340; // sound takes a moment to arrive
+    this._noise('lowpass', 900, 1, 0.5, 0.35 * v, delay);
+    for (let i = 0; i < 10; i++) this._noise('highpass', 3000, 1, 0.03, 0.08 * v, delay + 0.4 + Math.random() * 0.8);
   }
 
   mobHurt(dist) {

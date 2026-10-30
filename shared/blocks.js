@@ -203,7 +203,7 @@ COLORS.forEach(([color, wool, concrete, terracotta], i) => {
 // ============================================================================
 // Block families with STATES.
 // A door can face 4 ways, be open or shut, and be a top or bottom half: that's
-// 16 combinations. Each combination is its own block id (like Minecraft's old
+// 16 combinations. Each combination is its own block id (like the classic games' old
 // "metadata"). The first state of a family is the "item" form you hold; the
 // rest are hidden from the creative menu and drop the base item.
 // IMPORTANT: families get ids from 1024 upward IN THE ORDER WRITTEN HERE, so
@@ -443,6 +443,20 @@ cube('wet_sponge', { tex: { all: 'sponge:wet' }, hardness: 0.6, sound: 'grass', 
 family('fire', [[{}, { solid: false, opaque: false, transparent: true, cutout: true, lightOpacity: 0, light: 15, shape: 'cross',
   tex: { all: 'fire' }, hardness: 0, drops: null, replaceable: true, hidden: true, placeable: true, sound: 'grass', support: 'below', burns: true }]]);
 
+// ---- 12. Rail curves and slopes (placed automatically when rails join up) ---------------
+const RAIL_PART = { solid: false, opaque: false, transparent: true, cutout: true, lightOpacity: 0, hardness: 0.7, tool: 'pickaxe',
+  sound: 'stone', hidden: true, placeable: true, support: 'below' };
+// curves connect two neighbouring sides; only plain rails can turn
+family('rail_curve', [['se', 0], ['ne', 1], ['nw', 2], ['sw', 3]].map(([curve, turns]) => [{ curve }, {
+  ...RAIL_PART, shape: 'flat', tex: { all: `rail_curve@r${turns}` }, displayName: 'Rail', drops: 'rail', railOf: 'rail' }]));
+for (const [base, tex, disp] of [['rail', 'rail', 'Rail'], ['powered_rail', 'rail:powered', 'Powered Rail'], ['detector_rail', 'rail:detector', 'Detector Rail'], ['activator_rail', 'rail:activator', 'Activator Rail']]) {
+  // `facing` = the direction the rail climbs toward
+  family(`${base}_slope`, FACINGS.map(f => [{ facing: f }, { ...RAIL_PART, shape: 'rail_slope', tex: { all: tex }, displayName: disp, drops: base, railOf: base }]));
+}
+
+// ---- 13. Infested stone: looks just like stone, but a silverfish hides inside -----------
+cube('infested_stone', { tex: { all: 'stone' }, displayName: 'Stone', hardness: 0.75, tool: 'pickaxe', drops: null, sound: 'stone', hidden: true, infested: true });
+
 // ---- Defaults and lookup tables -----------------------------------------------------------
 const DEFAULTS = {
   solid: true, opaque: true, transparent: false, cutout: false, translucent: false, liquid: false,
@@ -470,7 +484,7 @@ for (const def of BLOCK_LIST) {
 export const B = Object.fromEntries(BLOCK_LIST.filter(b => !b.name.includes('[')).map(b => [b.name.toUpperCase(), b.id]));
 
 // Shape codes used by the mesher and physics.
-export const SHAPE_CODE = { cube: 0, cross: 1, torch: 2, flat: 3, wall_torch: 4, boxes: 5, fence: 6, wall: 7, pane: 8, wall_flat: 9, crop: 10 };
+export const SHAPE_CODE = { cube: 0, cross: 1, torch: 2, flat: 3, wall_torch: 4, boxes: 5, fence: 6, wall: 7, pane: 8, wall_flat: 9, crop: 10, rail_slope: 11 };
 const DYNAMIC = { fence: 6, wall: 7, pane: 8 };
 
 // Lookup tables as typed arrays: much faster than object property access in the

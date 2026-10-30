@@ -148,6 +148,7 @@ export function meshChunk(chunks, columnBiomes) {
           emitBoxes(x, y, z, id, p, dynamicBoxes(shape === 6 ? 'fence' : shape === 7 ? 'wall' : 'pane', conn));
         } else if (shape === 9) wallQuad(x, y, z, id, p);
         else if (shape === 10) cropQuads(x, y, z, id, p);
+        else if (shape === 11) slopeQuad(x, y, z, id, p);
       }
     }
   }
@@ -376,6 +377,28 @@ function emitBoxes(x, y, z, id, p, boxes) {
       buf.quad(ids[0], ids[1], ids[2], ids[3], false);
     }
   }
+}
+
+// Sloped rails: one double-sided quad rising toward the direction the rail climbs.
+function slopeQuad(x, y, z, id, p) {
+  const buf = opaqueBuf;
+  buf.ensure(8, 12);
+  const dx = WALL_DIR[id * 2], dz = WALL_DIR[id * 2 + 1];
+  const layer = faceLayers[id * 6 + 2], s = Math.max(sky[p], sky[p + PLAYER]), b = Math.max(blk[p], blk[p + PLAYER]), sh = 3 | (2 << 2);
+  const lo = y + 0.06, hi = y + 1.06;
+  let pts, uv;
+  if (dz !== 0) {
+    const yN = dz < 0 ? hi : lo, yS = dz < 0 ? lo : hi;   // height at the north (z) and south (z+1) edges
+    pts = [[x, yN, z], [x + 1, yN, z], [x + 1, yS, z + 1], [x, yS, z + 1]];
+    uv = [[0, 0], [1, 0], [1, 1], [0, 1]];
+  } else {
+    const yW = dx < 0 ? hi : lo, yE = dx < 0 ? lo : hi;
+    pts = [[x, yW, z], [x + 1, yE, z], [x + 1, yE, z + 1], [x, yW, z + 1]];
+    uv = [[0, 0], [0, 1], [1, 1], [1, 0]];                  // turned so the track runs east-west
+  }
+  const ids = pts.map((q, k) => buf.vertex(q[0], q[1], q[2], uv[k][0], uv[k][1], layer, s, b, sh));
+  buf.quad(ids[0], ids[3], ids[2], ids[1], false);
+  buf.quad(ids[0], ids[1], ids[2], ids[3], false);
 }
 
 // Ladders and vines: a double-sided quad just in front of the wall they hang on.

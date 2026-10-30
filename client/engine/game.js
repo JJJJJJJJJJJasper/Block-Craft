@@ -7,7 +7,7 @@ import {
   REACH, CLIENT_SEND_RATE, DAY_TICKS, DAY_LENGTH_SECONDS, MAX_HEALTH, MAX_HUNGER,
   PHYSICS, MIN_RENDER_DISTANCE, CHUNK_SIZE, CHUNK_HEIGHT,
 } from '../../shared/config.js';
-import { BLOCKS, B, IS_SOLID, IS_LIQUID, IS_OPAQUE, needsSupport, supportPos, isSupported, withState, FAMILIES } from '../../shared/blocks.js';
+import { BLOCKS, B, IS_SOLID, IS_LIQUID, IS_OPAQUE, CONNECT, needsSupport, supportPos, isSupported, withState, FAMILIES } from '../../shared/blocks.js';
 import { placementFor, canReplace } from '../../shared/placement.js';
 import { ITEMS, ITEM_BY_NAME, breakTime } from '../../shared/items.js';
 import { raycastBlocks } from '../../shared/raycast.js';
@@ -15,6 +15,11 @@ import { boxIntersectsBlock } from '../../shared/physics.js';
 import { createGenerator, BIOME_NAMES } from '../../shared/terrain.js';
 import { BIOME_LIST } from '../../shared/biomes.js';
 import { FarTerrain } from '../rendering/farTerrain.js';
+import { Cutscene } from './cutscene.js';
+import { Music } from '../audio/music.js';
+import { VehicleView } from '../rendering/vehicles.js';
+import { VEHICLE_KINDS, isBoat, isCart, boatStep, mountStep, RIDE_SPEED } from '../../shared/vehicles.js';
+import { cartStep, initRailPower, isRail } from '../../shared/rails.js';
 import { SEA_LEVEL } from '../../shared/config.js';
 import { ClientWorld } from '../world/world.js';
 import { Player } from './player.js';
@@ -63,6 +68,13 @@ export class Game {
     this.input = new Input(renderer.renderer.domElement);
     this.itemModels = new ItemModels(textures);
     this.far = new FarTerrain(renderer.scene, this.world.pool, SEA_LEVEL); // distant mountains
+    this.cutscene = new Cutscene();
+    this.music = new Music(sfx);
+    this.vehicles = new VehicleView(renderer.scene);
+    this.riding = null; // {type: 'vehicle', id, kind, sim} while in a minecart or boat
+    initRailPower(B);
+    this.jukeboxes = new Map(); // "x,y,z" -> disc name playing there
+    for (const [x, y, z, disc] of welcome.jukeboxes || []) this._setJukebox(x, y, z, disc);
     this.entities = new Entities(renderer.scene, textures.icons, sfx, this.itemModels);
     this.entities.itemIdOf = (name) => ITEM_BY_NAME[name].id;
     this.hand = new HandView(this.itemModels, playerColors(this.playerName).skin);
@@ -124,12 +136,16 @@ export class Game {
     this.renderer.renderer.setPixelRatio(s.hidpi ? Math.min(2, window.devicePixelRatio || 1) : 1);
     this.input.sensitivity = s.sensitivity;
     this.sfx.setVolume(s.volume);
+    this.music.setVolume(s.music ?? 0.5);
     this.showDebug = s.showFps;
     this.renderer.setFancy(s.fancy !== false);
   }
 
   setTime(t) { this.time = t; this.timeSync = performance.now(); }
-  get worldTime() { return (this.time + ((performance.now() - this.timeSync) / 1000) * TICKS_PER_SECOND) % DAY_TICKS; }
+  get worldTime() {
+    if (this.cutscene && this.cutscene.active) return this.cutscene.time();
+    return (this.time + ((performance.now() - this.timeSync) / 1000) * TICKS_PER_SECOND) % DAY_TICKS; }
+
 
   get isHost() { return this.hostId === this.myId; }
 
@@ -201,7 +217,57 @@ export class Game {
   _wireNetwork() {
     const net = this.net;
     const names = () => new Map(this.playerList.map(p => [p.id, p.name]));
-    net.on('snap', (m) => this.entities.applySnapshot(m, this._names || (this._names = names())));
+    net.on('snap', (m) => {
+      this.entities.applySnapshot(m, this._names || (this._names = names()));
+      this.vehicles.apply(m.v);
+    });
+    net.on('mounted', (m) => {
+      // we're in: start driving it ourselves
+      const pos = { x: m.pos[0], y: m.pos[1], z: m.pos[2] };
+      if (m.type === 'mob') {
+        // a horse (or donkey, mule, llama): steer it once it's tamed and saddled, else just hang on
+        this.riding = { type: 'mob', id: m.id, kind: m.kind, steer: !!m.steer, seat: (m.h || 1.6) * 0.44,
+          sim: { pos, vel: { x: 0, y: 0, z: 0 }, yaw: m.yaw, onGround: false } };
+        this.hud.toast(m.steer ? 'W to ride, Space to jump, Shift to get off' : 'Hold on! Shift to get off', 2.5);
+        return;
+      }
+      const sim = isCart(m.kind) ? { pos, speed: 0, dir: { x: -Math.sin(this.player.yaw), y: 0, z: -Math.cos(this.player.yaw) } }
+        : { pos, vel: { x: 0, y: 0, z: 0 }, yaw: m.yaw };
+      this.riding = { type: m.type, id: m.id, kind: m.kind, sim };
+      this.hud.toast('Press Shift to get out', 2);
+    });
+    net.on('bucked', (m) => {
+      // the horse threw us off (or isn't there any more)
+      if (!this.riding || this.riding.type !== 'mob') return;
+      this.riding = null;
+      this.entities.localMount = null;
+      const p = this.player;
+      p.pos.y += 1; p.vel = { x: (Math.random() - 0.5) * 8, y: 5, z: (Math.random() - 0.5) * 8 }; p.knockTimer = 0.3;
+      if (m.rear) this.hud.toast('It threw you off! Keep trying (treats help).', 2.5);
+    });
+    net.on('consumeHeld', (m) => {
+      // the server used up the item we were holding (taming, breeding, a lead, a saddle...)
+      if (this.mode !== 'survival') return;
+      if (m.give) this._swapHeld(m.give); else this.inv.consumeHeld(1);
+    });
+    net.on('hearts', (m) => {
+      this.entities.fx.hearts(m.x, m.y, m.z);
+      if (Math.hypot(m.x - this.player.pos.x, m.z - this.player.pos.z) < 16) this.sfx.heart();
+    });
+    net.on('fangs', (m) => {
+      this.entities.fx.fangs(m.points);
+      const [x, y, z] = m.points[0] || [0, 0, 0];
+      this.sfx.snap(Math.hypot(x - this.player.pos.x, y - this.player.pos.y, z - this.player.pos.z));
+    });
+    net.on('beam', (m) => {
+      this.entities.fx.beam(() => this.entities.mobCentre(m.mob), () => this.entities.playerCentre(m.player), m.time);
+      const c = this.entities.mobCentre(m.mob);
+      if (c) this.sfx.zap(Math.hypot(c.x - this.player.pos.x, c.y - this.player.pos.y, c.z - this.player.pos.z));
+    });
+    net.on('firework', (m) => {
+      this.entities.fx.firework(m.x, m.y, m.z, m.seed);
+      this.sfx.launch(Math.hypot(m.x - this.player.pos.x, m.y - this.player.pos.y, m.z - this.player.pos.z));
+    });
     net.on('players', (m) => {
       this.playerList = m.list;
       this.hostId = m.host;
@@ -229,9 +295,25 @@ export class Game {
       if (this.menus.pauseVisible) this.menus.updateHost(this.isHost, this.playerList, this.myId, this.hostId, this.mode);
     });
     net.on('time', (m) => this.setTime(m.time));
+    net.on('jukebox', (m) => this._setJukebox(m.x, m.y, m.z, m.disc));
+    net.on('cutscene', (m) => {
+      // Everyone is asleep: close any screen, hide the HUD and watch the sunrise.
+      if (this.invUI.isOpen) this.invUI.close();
+      this.input.releaseAll();
+      this.hud.show(false);
+      const e = this.player.eye;
+      this.cutscene.start(m, { x: e.x, y: e.y, z: e.z }, DAY_TICKS);
+    });
     net.on('poof', (m) => {
       const d = Math.hypot(m.x - this.player.pos.x, m.y - this.player.pos.y, m.z - this.player.pos.z);
-      if (m.kind === 'arrow') this.sfx.place('wood', d); else this.sfx.break(m.kind === 'egg' ? 'glass' : 'snow', d);
+      if (['smoke', 'spell', 'snow', 'teleport'].includes(m.kind)) {
+        this.entities.fx.puff(m.kind, m.x, m.y, m.z);
+        if (m.kind === 'spell') this.sfx.spell(d); else if (m.kind === 'teleport') this.sfx.whisper(d);
+      } else if (m.kind === 'arrow') this.sfx.place('wood', d);
+      else {
+        this.sfx.break(m.kind === 'egg' || m.kind === 'potion' ? 'glass' : 'snow', d);
+        if (m.kind === 'potion') this.entities.fx.puff('spell', m.x, m.y, m.z);
+      }
       this.lastPoof = m;
     });
     net.on('items', (m) => {
@@ -244,7 +326,7 @@ export class Game {
       this.sfx.pickup();
       if (this.invUI.isOpen) this.invUI.render();
     });
-    net.on('hurt', (m) => this.hurt(m.amount, m.from, m.cause || 'was slain by a zombie'));
+    net.on('hurt', (m) => this.hurt(m.amount, m.from, m.cause || 'was slain by a zombie', m.noKnock));
     net.on('container', (m) => {
       if (m.kind === 'update') { if (this.containerPos) this.invUI.setContainer(this.containerPos, m.slots); return; }
       this.containerPos = { x: m.x, y: m.y, z: m.z };
@@ -312,11 +394,15 @@ export class Game {
     } else if (cmd === 'tp') {
       const [x, y, z] = args.map(Number);
       if ([x, y, z].every(Number.isFinite)) host('tp', [x, y, z]); else this.chat.add('Usage: /tp <x> <y> <z>', null, true);
+    } else if (cmd === 'summon') {
+      if (arg) host('summon', arg.toLowerCase().replace(/ /g, '_')); else this.chat.add('Usage: /summon <mob>, e.g. /summon horse', null, true);
+    } else if (cmd === 'locate') {
+      host('locate', arg || '?');
     } else if (cmd === 'kick') {
       const p = this.playerList.find(q => q.name.toLowerCase() === arg.toLowerCase());
       if (p) host('kick', p.id); else this.chat.add(`No player named ${arg}`, null, true);
     } else {
-      this.chat.add('Commands: /time day|noon|sunset|night, /mode survival|creative, /tp x y z, /kick <name> (host only)', null, true);
+      this.chat.add('Commands: /time day|noon|sunset|night, /mode survival|creative, /tp x y z, /summon <mob>, /locate <structure>, /kick <name> (host only)', null, true);
     }
   }
 
@@ -342,23 +428,27 @@ export class Game {
         if (!this.input.locked) this.pause();
         else this.menus.hideAll();
       }
-    } else if (this.state === 'playing') {
+    } else if (this.state === 'playing' && !this.cutscene.active) {
       this._play(dt);
     }
 
     this._updateCamera();
     this.entities.listener = p.pos;
     this.entities.update(dt, (x, y, z) => this.world.getBlock(x, y, z));
+    this.vehicles.update();
     const eyeBlock = this.world.getBlock(Math.floor(p.pos.x), Math.floor(p.eye.y), Math.floor(p.pos.z));
     this.renderer.updateEnvironment(this.worldTime / DAY_TICKS, eyeBlock === B.LAVA ? 'lava' : IS_LIQUID[eyeBlock] ? 'water' : null, this._inSnowyBiome(dt));
     this.far.update(p.pos.x, p.pos.z, this.world.renderDistance, this.renderer.farEnv);
+    this.musicTimer = (this.musicTimer || 0) - dt;
+    if (this.musicTimer <= 0) { this.musicTimer = 0.25; this.mood = this._musicMood(); }
+    this.music.update({ x: p.pos.x, y: p.pos.y + 1.6, z: p.pos.z, yaw: p.yaw }, this.mood);
     this.hud.update(dt, this.inv, p, this.mode);
     this.hud.showPlayerList(this.input.locked && this.input.down('Tab'), this.playerList, this.hostId, this.net.ping);
     if (this.showDebug) this.hud.setDebug(true, this._debugText());
     else this.hud.setDebug(false);
     this.renderer.render();
     // Item in your hand, drawn on top of the world.
-    if (this.state === 'playing' && !this.dead) {
+    if (this.state === 'playing' && !this.dead && !this.cutscene.active) {
       this.hand.setItem(this.inv.heldId);
       this.handLightTimer -= dt;
       if (this.handLightTimer <= 0) { this.handLightTimer = 0.25; this.handLight = this._lightHere(); }
@@ -396,8 +486,11 @@ export class Game {
       // Double-tap W to sprint; keep sprinting while W stays held.
       sprint: active && (input.wasDoubleTapped('KeyW') || (p.sprinting && input.down('KeyW'))),
     };
+    // Riding a minecart or boat: drive it instead of walking.
+    if (this.riding && this.riding.type === 'vehicle') this._drive(dt, ctl, active);
+    else if (this.riding && this.riding.type === 'mob') this._ride(dt, ctl, active);
     // Don't simulate until the ground under us has loaded (otherwise we'd fall through).
-    if (this.world.isReadyAt(p.pos.x, p.pos.z)) {
+    else if (this.world.isReadyAt(p.pos.x, p.pos.z)) {
       const getBlock = (x, y, z) => this.world.getBlock(x, y, z);
       const events = {
         onFallDamage: (n) => this.damage(n, 'fell from a high place'),
@@ -415,7 +508,7 @@ export class Game {
     this.sendTimer += dt;
     if (this.sendTimer >= 1 / CLIENT_SEND_RATE) {
       this.sendTimer = 0;
-      this.net.send({ t: 'pos', p: [r3(p.pos.x), r3(p.pos.y), r3(p.pos.z)], r: [r3(p.yaw), r3(p.pitch)], f: p.flying ? 1 : 0, m: p.moving ? 1 : 0, s: p.sneaking ? 1 : 0, h: this.inv.heldId });
+      this.net.send({ t: 'pos', p: [r3(p.pos.x), r3(p.pos.y), r3(p.pos.z)], r: [r3(p.yaw), r3(p.pitch)], f: p.flying ? 1 : 0, m: p.moving ? 1 : 0, s: p.sneaking ? 1 : 0, h: this.inv.heldId, rd: this.riding ? 1 : 0 });
     }
     // ---- Save inventory/health on the server every few seconds ----
     this.invSyncTimer += dt;
@@ -430,10 +523,134 @@ export class Game {
 
     if (active) this._interact(dt);
     else { this.renderer.setHighlight(null); this.renderer.setCrack(null, 0); this.breaking = null; }
+    // where our hand is, for a lead we're holding
+    const look = p.lookDir();
+    this.entities.localHand = { x: p.pos.x + look[0] * 0.5 - Math.cos(p.yaw) * 0.3, y: p.pos.y + 1.2, z: p.pos.z + look[2] * 0.5 + Math.sin(p.yaw) * 0.3 };
+    this._checkStare(dt);
+  }
+
+  /** Riding a horse: steer it if it's tamed and saddled, otherwise just sit on it. */
+  _ride(dt, ctl, active) {
+    const p = this.player, r = this.riding;
+    if (active && (this.input.down('ShiftLeft') || this.input.down('ShiftRight'))) return this.dismount();
+    const e = this.entities.mobs.get(r.id);
+    if (!e) { this.riding = null; this.entities.localMount = null; return; }
+    if (r.steer) {
+      const sim = r.sim, get = (x, y, z) => this.world.getBlock(x, y, z);
+      mountStep(sim, dt, get, { forward: ctl.forward, right: ctl.right, jump: ctl.jump, yaw: p.yaw }, RIDE_SPEED[r.kind] || 8);
+      this.entities.localMount = { id: r.id, pos: sim.pos, yaw: p.yaw + Math.PI };
+      p.pos = { x: sim.pos.x, y: sim.pos.y + r.seat, z: sim.pos.z };
+      this.mountSendTimer = (this.mountSendTimer || 0) + dt;
+      if (this.mountSendTimer > 1 / CLIENT_SEND_RATE) {
+        this.mountSendTimer = 0;
+        this.net.send({ t: 'mmove', p: [sim.pos.x, sim.pos.y, sim.pos.z].map(v => Math.round(v * 1000) / 1000), yaw: Math.round((p.yaw + Math.PI) * 1000) / 1000 });
+      }
+    } else {
+      const gp = e.group.position;
+      p.pos = { x: gp.x, y: gp.y + r.seat, z: gp.z };
+    }
+    p.vel = { x: 0, y: 0, z: 0 };
+    p.fallStartY = null;
+  }
+
+  /** Looking a Shade in the face makes it angry (tell the server). */
+  _checkStare(dt) {
+    this.stareTimer = (this.stareTimer || 0) - dt;
+    if (this.stareTimer > 0 || this.mode !== 'survival') return;
+    this.stareTimer = 0.25;
+    const p = this.player, eye = p.eye, dir = p.lookDir();
+    for (const [id, e] of this.entities.mobs) {
+      if (e.kind !== 'shade' || e.angry) continue;
+      const g = e.group.position, hx = g.x - eye.x, hy = g.y + 2.55 - eye.y, hz = g.z - eye.z;
+      const d = Math.hypot(hx, hy, hz);
+      if (d > 64 || d < 1) continue;
+      const along = hx * dir[0] + hy * dir[1] + hz * dir[2];
+      const off = Math.hypot(hx - dir[0] * along, hy - dir[1] * along, hz - dir[2] * along);
+      if (along <= 0 || off > 0.35) continue;
+      const block = raycastBlocks((x, y, z) => this.world.getBlock(x, y, z), [eye.x, eye.y, eye.z], dir, d, (bid) => IS_OPAQUE[bid]);
+      if (block) continue;
+      this.net.send({ t: 'stare', mob: id });
+      this.sfx.whisper(d * 0.5);
+    }
+  }
+
+  /** Ask for a name (for a name tag). Calls back with the text, or nothing if cancelled. */
+  askName(cb) {
+    const screen = document.getElementById('mobname-screen'), input = document.getElementById('mobname-input');
+    this._beginUi('name');
+    screen.classList.remove('hidden');
+    input.value = '';
+    setTimeout(() => input.focus(), 30);
+    const finish = (ok) => {
+      screen.classList.add('hidden');
+      input.onkeydown = null;
+      document.getElementById('mobname-ok').onclick = document.getElementById('mobname-cancel').onclick = null;
+      this._endUi();
+      const name = input.value.trim();
+      if (ok && name) cb(name);
+    };
+    input.onkeydown = (ev) => { ev.stopPropagation(); if (ev.key === 'Enter') finish(true); else if (ev.key === 'Escape') finish(false); };
+    document.getElementById('mobname-ok').onclick = () => finish(true);
+    document.getElementById('mobname-cancel').onclick = () => finish(false);
+  }
+
+  /** One frame of driving the vehicle we sit in. */
+  _drive(dt, ctl, active) {
+    const p = this.player, r = this.riding, get = (x, y, z) => this.world.getBlock(x, y, z);
+    if (active && (this.input.down('ShiftLeft') || this.input.down('ShiftRight'))) return this.dismount();
+    const sim = r.sim;
+    if (isCart(r.kind)) {
+      const look = { x: -Math.sin(p.yaw), z: -Math.cos(p.yaw) };
+      if (!cartStep(sim, dt, get, ctl.forward, look)) {
+        // off the end of the rails: just sit still
+        sim.speed = 0;
+      }
+      this.vehicles.setLocal(r.id, sim.pos, Math.atan2(-sim.dir.x, -sim.dir.z));
+      p.pos = { x: sim.pos.x, y: sim.pos.y + 0.25, z: sim.pos.z };
+    } else {
+      boatStep(sim, dt, get, { forward: ctl.forward > 0, back: ctl.forward < 0, left: ctl.right < 0, right: ctl.right > 0 });
+      this.vehicles.setLocal(r.id, sim.pos, sim.yaw);
+      p.pos = { x: sim.pos.x, y: sim.pos.y + 0.1, z: sim.pos.z };
+    }
+    p.vel = { x: 0, y: 0, z: 0 };
+    p.fallStartY = null;
+    this.vehicleSendTimer = (this.vehicleSendTimer || 0) + dt;
+    if (this.vehicleSendTimer > 1 / CLIENT_SEND_RATE) {
+      this.vehicleSendTimer = 0;
+      const yaw = isCart(r.kind) ? Math.atan2(-sim.dir.x, -sim.dir.z) : sim.yaw;
+      this.net.send({ t: 'vmove', p: [sim.pos.x, sim.pos.y, sim.pos.z].map(v => Math.round(v * 1000) / 1000), yaw });
+    }
+  }
+
+  dismount() {
+    if (!this.riding) return;
+    if (this.riding.type === 'vehicle') this.net.send({ t: 'vleave' });
+    else {
+      this.net.send({ t: 'unride' });
+      // step off to the side of the horse
+      this.player.pos.x += Math.cos(this.player.yaw) * 1.2;
+      this.player.pos.z -= Math.sin(this.player.yaw) * 1.2;
+    }
+    this.vehicles.localId = null;
+    this.entities.localMount = null;
+    this.player.pos.y += 0.9;
+    this.riding = null;
   }
 
   _updateCamera() {
     const cam = this.renderer.camera, p = this.player;
+    if (this.cutscene.active) {
+      const sky = this.renderer.sky.uniforms;
+      const shot = this.cutscene.update(sky.sunDir.value, sky.moonDir.value, () => this.sfx.dawn());
+      if (shot) {
+        cam.position.set(shot.pos.x, shot.pos.y, shot.pos.z);
+        cam.rotation.set(shot.pitch, shot.yaw, 0);
+        return;
+      }
+      // finished: back to the player, morning time from the server
+      this.setTime(this.cutscene.time());
+      this.hud.show(true);
+    }
     cam.position.set(p.pos.x, p.pos.y + PHYSICS.eyeHeight + p.eyeOffset, p.pos.z);
     // Sprinting widens the view; drawing a bow zooms in a little.
     const fov = this.settings.fov * (p.sprinting ? 1.1 : 1) * (1 - (this.bowCharge || 0) * 0.15);
@@ -452,9 +669,12 @@ export class Game {
     const p = this.player, input = this.input;
     const eye = p.eye, origin = [eye.x, eye.y, eye.z], dir = p.lookDir();
     const hit = raycastBlocks((x, y, z) => this.world.getBlock(x, y, z), origin, dir, REACH);
-    const mobHit = this.entities.raycastMobs(origin, dir, REACH);
+    let mobHit = this.entities.raycastMobs(origin, dir, REACH);
+    if (mobHit && this.riding && this.riding.type === 'mob' && mobHit.id === this.riding.id) mobHit = null; // not the horse we're on
     const playerHit = this.entities.raycastPlayers(origin, dir, REACH);
-    const mob = playerHit && (!mobHit || playerHit.dist < mobHit.dist) ? playerHit : mobHit;
+    let mob = playerHit && (!mobHit || playerHit.dist < mobHit.dist) ? playerHit : mobHit;
+    const vehHit = this.vehicles.raycast(origin, dir, REACH);
+    if (vehHit && (!mob || vehHit.dist < mob.dist)) mob = vehHit;
     // Tall grass, flowers etc. don't get in the way of hitting a mob or player.
     const targetMob = mob && (!hit || mob.dist < hit.dist || BLOCKS[hit.id].replaceable) ? mob : null;
     this.renderer.setHighlight(targetMob ? null : hit);
@@ -469,7 +689,8 @@ export class Game {
     if (targetMob) {
       if (breakPressed && this.attackCooldown <= 0) {
         this.attackCooldown = 0.3;
-        this.net.send(targetMob.player ? { t: 'attack', player: targetMob.id, held: this.inv.heldId } : { t: 'attack', mob: targetMob.id, held: this.inv.heldId });
+        if (targetMob.vehicle) this.net.send({ t: 'vhit', id: targetMob.id });
+        else this.net.send(targetMob.player ? { t: 'attack', player: targetMob.id, held: this.inv.heldId } : { t: 'attack', mob: targetMob.id, held: this.inv.heldId });
         this.hand.doSwing();
         if (this.mode === 'survival' && this.inv.held && ITEMS[this.inv.held.id].tool) this._wearTool();
       }
@@ -518,7 +739,8 @@ export class Game {
     this.bowCharge = 0;
 
     // Use / place.
-    if (targetMob && usePressed && !targetMob.player) this.useOnMob(targetMob);
+    if (targetMob && usePressed && targetMob.vehicle) this.net.send({ t: 'vmount', id: targetMob.id });
+    else if (targetMob && usePressed && !targetMob.player) this.useOnMob(targetMob);
     else if ((usePressed || (useDown && this.placeCooldown <= 0)) && !targetMob) {
       this.placeCooldown = 0.25;
       this.use(hit, usePressed);
@@ -558,14 +780,17 @@ export class Game {
 
   useOnMob(mob) {
     const held = this.inv.held, def = held && ITEMS[held.id];
-    if (mob.kind === 'villager') { this.net.send({ t: 'useMob', mob: mob.id, held: held ? held.id : 0 }); return; }
-    if (!def) return;
-    if (mob.kind === 'cow' && def.name === 'bucket') { this._swapHeld('milk_bucket'); this.hand.doSwing(); this.sfx.place('cloth'); return; }
-    if (mob.kind === 'sheep' && def.name === 'shears') {
-      this.net.send({ t: 'useMob', mob: mob.id, held: held.id });
-      this.hand.doSwing();
-      if (this.mode === 'survival') this._wearTool();
+    if (def && (mob.kind === 'cow' || mob.kind === 'mooshroom') && def.name === 'bucket') { this._swapHeld('milk_bucket'); this.hand.doSwing(); this.sfx.place('cloth'); return; }
+    if (def && def.name === 'name_tag') {
+      // name it: ask for the name first, then the server puts the tag on (and uses it up)
+      const id = held.id;
+      this.askName((name) => this.net.send({ t: 'useMob', mob: mob.id, held: id, name }));
+      return;
     }
+    // everything else (feeding, taming, breeding, leads, saddles, riding, sitting) is decided by the server
+    this.net.send({ t: 'useMob', mob: mob.id, held: held ? held.id : 0 });
+    this.hand.doSwing();
+    if (def && def.name === 'shears' && (mob.kind === 'sheep' || mob.kind === 'mooshroom') && this.mode === 'survival') this._wearTool();
   }
 
   use(hit, firstPress) {
@@ -599,11 +824,52 @@ export class Game {
       }
       if (b.container) return this._sendUse('open', hit.x, hit.y, hit.z); // the server replies with the contents
       if (b.bed) return this._sendUse('sleep', hit.x, hit.y, hit.z);
+      if (hit.id === FAMILIES.jukebox.baseId) {
+        // put a disc in (it plays for everyone nearby), or take it back out
+        const playing = this.jukeboxes.has(`${hit.x},${hit.y},${hit.z}`);
+        if (playing || (heldDef && heldDef.name.startsWith('music_disc_'))) {
+          if (!playing && survival) this.inv.consumeHeld(1);
+          return this._sendUse('jukebox', hit.x, hit.y, hit.z);
+        }
+      }
       if (b.base === 'cake' && (!survival || p.hunger < MAX_HUNGER)) {
         if (survival) p.eat(2);
         this.sfx.eat();
         return this._sendUse('cake', hit.x, hit.y, hit.z);
       }
+    }
+
+    // ---- Leads: tie the animals you're leading to a fence post (or take them back) ----
+    if (hit && firstPress && CONNECT[hit.id] === 1) {
+      const mine = [...this.entities.mobs.values()].some(e => e.leash === this.myId);
+      const tied = [...this.entities.mobs.values()].some(e => Array.isArray(e.leash) && e.leash[0] === hit.x && e.leash[1] === hit.y && e.leash[2] === hit.z);
+      if (mine || tied) return this._sendUse('leash', hit.x, hit.y, hit.z);
+    }
+
+    // ---- Firework rockets shoot up from the block you click ----
+    if (heldDef && firstPress && heldDef.name === 'firework_rocket' && hit) {
+      this.net.send({ t: 'firework', x: hit.x + 0.5 + hit.nx * 0.6, y: hit.y + 0.5 + hit.ny * 0.6, z: hit.z + 0.5 + hit.nz * 0.6 });
+      if (survival) this.inv.consumeHeld(1);
+      this.hand.doSwing();
+      return;
+    }
+
+    // ---- Minecarts go on rails, boats on water (or the ground) ----
+    if (heldDef && firstPress && VEHICLE_KINDS.includes(heldDef.name)) {
+      let pos = null;
+      if (isCart(heldDef.name) && hit && isRail(hit.id)) pos = { x: hit.x + 0.5, y: hit.y, z: hit.z + 0.5 };
+      if (isBoat(heldDef.name)) {
+        const w = raycastBlocks(get, origin, dir, REACH, (id) => id !== 0);
+        if (w && IS_LIQUID[w.id]) pos = { x: w.x + 0.5, y: w.y + 0.6, z: w.z + 0.5 };
+        else if (hit && hit.ny === 1) pos = { x: hit.x + 0.5, y: hit.y + 1, z: hit.z + 0.5 };
+      }
+      if (pos) {
+        this.net.send({ t: 'vplace', kind: heldDef.name, ...pos, yaw: p.yaw });
+        if (survival) this.inv.consumeHeld(1);
+        this.hand.doSwing();
+        this.sfx.place('wood');
+      }
+      return;
     }
 
     // ---- Thrown things: snowballs, eggs, ender pearls ----
@@ -725,7 +991,7 @@ export class Game {
     const [fx, fy, fz, fid] = plan.blocks[0];
     if (needsSupport(fid) && !isSupported(fid, fx, fy, fz, get)) return;
     for (const [x, y, z, id] of plan.blocks) this.world.setBlock(x, y, z, id, true);
-    this.net.send({ t: 'place', blocks: plan.blocks });
+    this.net.send({ t: 'place', blocks: plan.send || plan.blocks });
     this.sfx.place(BLOCKS[fid].sound);
     this.hand.doSwing();
     if (survival) this.inv.consumeHeld(1);
@@ -753,13 +1019,16 @@ export class Game {
   }
 
   /** Damage from a mob: knockback, reduced by armor (which wears down). */
-  hurt(amount, from, cause) {
+  hurt(amount, from, cause, noKnock = false) {
     const p = this.player;
     const dx = p.pos.x - from[0], dz = p.pos.z - from[2];
     const len = Math.hypot(dx, dz) || 1;
     // Knockback: a shove away from the attacker; for a moment you can't steer against it.
-    p.vel.x = (dx / len) * 9; p.vel.z = (dz / len) * 9; p.vel.y = 6;
-    p.knockTimer = 0.35;
+    // (not from poison or magic, and not while riding)
+    if (!noKnock && !this.riding) {
+      p.vel.x = (dx / len) * 9; p.vel.z = (dz / len) * 9; p.vel.y = 6;
+      p.knockTimer = 0.35;
+    }
     if (this.mode !== 'survival') return;
     // Each armor point blocks 4% of the damage (20 points = 80%).
     const points = Math.min(20, this.inv.armorPoints());
@@ -803,6 +1072,28 @@ export class Game {
   }
 
   // ---- Debug overlay ---------------------------------------------------------------------
+  _setJukebox(x, y, z, disc) {
+    const key = `${x},${y},${z}`;
+    if (disc) this.jukeboxes.set(key, disc); else this.jukeboxes.delete(key);
+    this.music.setDisc(key, { x, y, z }, disc);
+    if (disc && this.hud) this.hud.toast(`Now playing: ${ITEM_BY_NAME[disc]?.displayName || 'a music disc'}`);
+  }
+
+  /** Which kind of background music fits right now? */
+  _musicMood() {
+    const p = this.player.pos;
+    // deep underground with rock overhead: cave music
+    if (p.y < SEA_LEVEL - 8) {
+      let roof = false;
+      for (let y = Math.floor(p.y) + 2; y < Math.floor(p.y) + 30; y++) if (IS_OPAQUE[this.world.getBlock(Math.floor(p.x), y, Math.floor(p.z))]) { roof = true; break; }
+      if (roof) return 'cave';
+    }
+    const t = this.worldTime / DAY_TICKS;
+    if (t < 0.42) return 'day';
+    if (t < 0.58) return 'evening';
+    return t < 0.97 ? 'night' : 'evening';
+  }
+
   /** Is the player in a snowy biome? (checked twice a second; the sky shows an aurora there at night) */
   _inSnowyBiome(dt) {
     this.snowyTimer -= dt;

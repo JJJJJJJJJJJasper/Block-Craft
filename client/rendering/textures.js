@@ -779,6 +779,21 @@ const PAINTERS = {
     if (kind === 'detector') rect(img, 6, 6, 10, 10, hex('#8a8a8a'));
     if (kind === 'activator') for (const y of [3, 11]) rect(img, 6, y, 10, y + 1, hex('#c41a1a'));
   },
+  rail_curve(img, r) {
+    // a quarter-circle of track joining the top and right edges of the picture
+    clear(img);
+    const tie = hex('#6e5330'), metal = hex('#a0a0a0'), md = shade(metal, 0.65);
+    // wooden sleepers fanning out from the corner
+    for (let k = 0; k < 5; k++) {
+      const a = (k + 0.5) / 5 * Math.PI / 2;
+      for (let d = 2.5; d < 14.5; d += 0.5) img.set(Math.floor(S - Math.cos(a) * d), Math.floor(Math.sin(a) * d), shade(tie, 0.9 + r() * 0.15));
+    }
+    for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+      const d = Math.hypot(x + 0.5 - S, y + 0.5);   // distance from the top-right corner
+      if (Math.abs(d - 4.5) < 0.6 || Math.abs(d - 11.5) < 0.6) img.set(x, y, metal);
+      else if (Math.abs(d - 5.4) < 0.4 || Math.abs(d - 12.4) < 0.4) img.set(x, y, md);
+    }
+  },
   redstone_dust(img, r) {
     clear(img);
     for (let i = 0; i < S; i++) {

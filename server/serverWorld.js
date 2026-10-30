@@ -27,6 +27,7 @@ export class ServerWorld {
       this.edits.set(key, m);
     }
     this.cache = new Map();
+    this.spawners = new Map(); // "x,y,z" -> {x, y, z, mob}: monster cages found in generated chunks
     this.spawn = this.gen.findSpawn();
   }
 
@@ -40,6 +41,7 @@ export class ServerWorld {
       return blocks;
     }
     blocks = this.gen.generateChunk(cx, cz);
+    this._findSpawners(cx, cz, blocks);
     const e = this.edits.get(key);
     if (e) for (const [i, id] of e) blocks[i] = id;
     this.cache.set(key, blocks);
@@ -47,6 +49,25 @@ export class ServerWorld {
       this.cache.delete(this.cache.keys().next().value);
     }
     return blocks;
+  }
+
+  /** Note where the monster cages are in a freshly generated chunk (dungeons, mineshafts). */
+  _findSpawners(cx, cz, blocks) {
+    for (let i = 0; i < blocks.length; i++) {
+      if (blocks[i] !== B.SPAWNER) continue;
+      const lx = i % 16, lz = Math.floor(i / 16) % 16, y = Math.floor(i / 256);
+      const x = cx * 16 + lx, z = cz * 16 + lz;
+      const k = `${x},${y},${z}`;
+      if (!this.spawners.has(k)) this.spawners.set(k, { x, y, z, mob: this.gen.spawnerMob(x, y, z) });
+    }
+  }
+
+  /** Monster cages within `r` blocks of (x, z) (generating those chunks if needed). */
+  spawnersNear(x, z, r) {
+    for (let cz = toChunk(z - r); cz <= toChunk(z + r); cz++) for (let cx = toChunk(x - r); cx <= toChunk(x + r); cx++) this.getChunk(cx, cz);
+    const out = [];
+    for (const s of this.spawners.values()) if (Math.abs(s.x - x) <= r && Math.abs(s.z - z) <= r) out.push(s);
+    return out;
   }
 
   getBlock(x, y, z) {

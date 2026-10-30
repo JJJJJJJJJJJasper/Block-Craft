@@ -97,7 +97,7 @@ const CHUNK_FRAG = /* glsl */`
     float light = max(sky, vBlock);
     // Light levels feel linear to the eye when brightness falls off
     // exponentially (~20% per level), plus a little ambient so caves aren't pitch black.
-    float bright = 0.07 + 0.93 * pow(0.8, (1.0 - light) * 15.0);
+    float bright = 0.13 + 0.87 * pow(0.8, (1.0 - light) * 15.0); // never pitch black, even deep in caves
     // Torch light is warm; sunlight is white.
     vec3 tint = mix(sunTint, vec3(1.0, 0.88, 0.72), clamp((vBlock - sky) * 2.0, 0.0, 1.0));
     vec3 color = tex.rgb * bright * tint * vShade;

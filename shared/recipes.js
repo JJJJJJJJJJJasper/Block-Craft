@@ -30,7 +30,7 @@ export const TAGS = {
 const RAW_RECIPES = [
   { pattern: ['X', 'X'], key: { X: '#planks' }, result: ['stick', 4] },
   { pattern: ['XX', 'XX'], key: { X: '#planks' }, result: ['crafting_table', 1] },
-  { pattern: ['C', 'S'], key: { C: 'coal', S: 'stick' }, result: ['torch', 4] },
+  { pattern: ['C', 'S'], key: { C: '#coals', S: 'stick' }, result: ['torch', 4] }, // coal or charcoal
   { pattern: ['XXX', 'X X', 'XXX'], key: { X: '#stone_like' }, result: ['furnace', 1] },
   { pattern: ['PPP', 'BBB', 'PPP'], key: { P: '#planks', B: 'book' }, result: ['bookshelf', 1] },
 

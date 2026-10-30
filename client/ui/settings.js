@@ -14,6 +14,7 @@ const DEFAULTS = {
   showFps: false,
   hidpi: false,
   fancy: true,
+  music: 0.5,
 };
 
 export function loadSettings() {
@@ -51,6 +52,7 @@ export function bindSettingsUI(settings, apply) {
   bind('fov-input', 'fov', v => v + '°');
   bind('sens-input', 'sensitivity', v => Number(v).toFixed(2));
   bind('vol-input', 'volume', v => Math.round(v * 100) + '%');
+  bind('music-input', 'music', v => Math.round(v * 100) + '%');
   bind('fps-input', 'showFps', () => '');
   bind('hidpi-input', 'hidpi', () => '');
   bind('fancy-input', 'fancy', () => '');
